@@ -72,6 +72,9 @@ struct worker {
 
     struct conn *io_cur;      /* conn on_io is currently dispatching, or NULL */
     int io_cur_freed;         /* set if close_conn freed io_cur this dispatch */
+
+    int spare_fd;             /* reserved fd, freed to shed load on EMFILE */
+    time_t last_full_log;     /* rate-limit the descriptor-exhaustion log */
 };
 
 static struct uircd *g_srv;
@@ -423,6 +426,10 @@ on_accept(struct iox_loop *loop, int fd, unsigned events, void *arg)
     struct worker *w = arg;
     (void)events;
 
+    /* Recover the reserved fd if a previous shed could not reopen it. */
+    if (w->spare_fd < 0)
+        w->spare_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+
     for (;;) {
         struct sockaddr_storage ss;
         socklen_t sl = sizeof(ss);
@@ -432,7 +439,33 @@ on_accept(struct iox_loop *loop, int fd, unsigned events, void *arg)
         if (cfd < 0) {
             if (errno == EINTR)
                 continue;
-            break; /* EAGAIN or a transient error: done for now */
+            if (errno == EMFILE || errno == ENFILE ||
+                errno == ENOBUFS || errno == ENOMEM) {
+                /* Descriptor table exhausted. libiox is level-triggered, so a
+                 * connection left in the accept queue keeps the listener
+                 * readable and this handler would spin at 100% CPU. Free the
+                 * reserved fd and use the slot to accept and immediately close
+                 * the backlog, shedding load (each client gets a prompt close)
+                 * instead of busy-looping, then reclaim the reserve. */
+                time_t now = time(NULL);
+                if (now != w->last_full_log) {
+                    logmsg("accept: %s; shedding connections", strerror(errno));
+                    w->last_full_log = now;
+                }
+                if (w->spare_fd >= 0) {
+                    close(w->spare_fd);
+                    w->spare_fd = -1;
+                    for (;;) {
+                        int victim = accept(fd, NULL, NULL);
+                        if (victim < 0)
+                            break;
+                        close(victim);
+                    }
+                    w->spare_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+                }
+                break;
+            }
+            break; /* EAGAIN or another transient error: done for now */
         }
         if (set_nonblock(cfd) < 0) {
             close(cfd);
@@ -793,6 +826,7 @@ main(int argc, char **argv)
         struct worker *w = &g_workers[i];
         w->id = i;
         w->is_ticker = (i == 0);
+        w->spare_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
         w->listen_fd = make_listener(port, use6);
         if (w->listen_fd < 0) {
             fprintf(stderr, "cannot bind port %d: %s\n", port,
@@ -840,6 +874,8 @@ main(int argc, char **argv)
         close(g_workers[i].listen_fd);
         close(g_workers[i].wake_fd[0]);
         close(g_workers[i].wake_fd[1]);
+        if (g_workers[i].spare_fd >= 0)
+            close(g_workers[i].spare_fd);
     }
     uircd_free(g_srv);
     free(g_workers);

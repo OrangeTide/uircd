@@ -21,6 +21,7 @@ H-005	NOTE	FIXED	protocol	parse_term accepts a field!=glob negation and GKILL/ki
 H-006	NOTE	FIXED	repo	No SECURITY.md: the repository gave no private route to report a vulnerability and no request to keep addresses out of reports	SECURITY.md	SECURITY.md exists, names a private reporting route, and asks reporters not to include third-party addresses	HARDEN.md#round-log	tree:round-1
 H-007	BLOCK	FIXED	host-net	Heap-use-after-free in the threaded host: when one fd was ready for both write and read in a single poll pass, on_io called on_writable (which could close_conn and free the conn on a write error or drained want_close) then still called on_readable on the freed conn. Reachable by any client, no auth. Found under TSan.	example/miniircd.c on_io; example/miniircd.c on_writable; example/miniircd.c close_conn	HARDEN/harness/tsan_load.c under make tsan with -t>1: TSan reports heap-use-after-free (on_readable after close_conn in on_writable) before the fix, 0 warnings after; on_io now tracks the dispatched conn and skips the read half if close_conn freed it	HARDEN/host-net.md#3	tree:round-3
 H-008	NOTE	FIXED	host-net	Data race on the shutdown flag g_stop: declared volatile sig_atomic_t, written unlocked by the main thread after sigwait and read by every worker, which is async-signal safe but not a thread synchronization and races under TSan	example/miniircd.c g_stop; example/miniircd.c on_wake; example/miniircd.c worker_main	Same TSan run as H-007: TSan reports a data race on g_stop (main write vs worker read) before the fix, 0 after; g_stop is now atomic_int so direct reads and writes are atomic	HARDEN/host-net.md#3	tree:round-3
+H-009	WARN	FIXED	host-net	Descriptor-exhaustion busy-loop: on accept() returning EMFILE/ENFILE/ENOBUFS/ENOMEM the handler just broke out, but libiox is level-triggered, so a connection left queued kept the listener readable and on_accept respun at 100% CPU (one core pegged) for as long as the fd table stayed full, a self-inflicted or attacker-induced livelock; the condition was also logged nowhere	example/miniircd.c on_accept	HARDEN/harness/emfile_load.c against a server run with a low RLIMIT_NOFILE: server CPU over a 3s exhaustion window is ~300 ticks (a pegged core) before the fix and ~1 after; the fix frees a reserved fd to accept-and-close the backlog (shedding load, logged rate-limited) and resumes accepting when fds free	HARDEN/host-net.md#4	tree:round-4
 ```
 
 ## Round log
@@ -71,3 +72,17 @@ H-008	NOTE	FIXED	host-net	Data race on the shutdown flag g_stop: declared volati
   close paths were not exercised under TSan (they share the fix); no TLS
   record-layer fuzzing; EMFILE-on-accept still unverified. TSan needs ASLR off
   (`setarch -R`) on this kernel.
+
+- 2026-11-18, round 4 (fixes in the round-4 working tree, `tree:round-4`). Scope:
+  verify the round-1 "EMFILE-on-accept unverified" gap. Found H-009: on accept
+  descriptor exhaustion the level-triggered loop busy-looped at 100% CPU (a
+  pegged core) with the condition logged nowhere, a denial of service. Measured
+  with `HARDEN/harness/emfile_load.c` against a server under `ulimit -n 64`:
+  ~300 CPU ticks over a 3s exhaustion window before the fix, ~1 after. Fixed by a
+  per-worker reserved fd that is freed to accept-and-close the backlog (shedding
+  load, logged once per second) and reclaimed afterward; accepting resumes when
+  descriptors free. Checked clean under ASan across repeated exhaustion cycles;
+  `make check` and the optimized build still pass. H-009 is WARN, FIXED.
+  Not checked this round: the reserve-and-shed was not stress-tested across many
+  workers at a hard process-wide `RLIMIT_NOFILE`; TLS record-layer fuzzing and
+  TSan coverage of the TLS handshake close paths remain open.

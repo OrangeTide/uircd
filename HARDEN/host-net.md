@@ -158,3 +158,40 @@ over 1600+ connections).
   under TSan.
 - TSan requires ASLR off on this kernel (`setarch -R`); the run is otherwise
   unmodified.
+
+## Round 4 (2026-11-18) -- descriptor exhaustion
+
+Round 1 noted the `accept` EMFILE path as "plausibly correct but unverified."
+This round verified it and found it wrong.
+
+### 1. Busy-loop on accept descriptor exhaustion  [H-009]
+
+- **Claim:** on `accept()` returning `EMFILE`/`ENFILE` (and the allocation
+  errors `ENOBUFS`/`ENOMEM`) the handler fell through to `break`, taking no other
+  action. libiox is level-triggered (poll), so a connection still queued on the
+  listener keeps it readable; the loop re-enters `on_accept`, `accept` fails the
+  same way, breaks, and the loop polls again. With the fd table full and a
+  connection pending this spins at 100% CPU (one core pegged) until a descriptor
+  frees. An attacker who exhausts the process fd table (open connections, bounded
+  by `max_clients` and the per-IP cap but also by `RLIMIT_NOFILE`, which may be
+  lower) turns the server's own accept loop into a denial of service. The
+  condition was logged nowhere.
+- **Lines:** example/miniircd.c `on_accept` (the former bare `break`).
+- **Falsifier:** `HARDEN/harness/emfile_load.c` against a server run under a low
+  `RLIMIT_NOFILE` (`ulimit -n 64`). Sampling the server's `utime+stime` over a
+  3-second exhaustion window: ~300 ticks (a pegged core) before the fix, ~1
+  after. Reproduced this round, both directions.
+- **Fix shape:** each worker reserves a spare fd (`/dev/null`). On exhaustion it
+  closes the spare and uses the freed slot to `accept` and immediately `close`
+  the backlog, shedding those connections (the client gets a prompt close rather
+  than a hang) and clearing the listener's readiness so the loop stops spinning,
+  then reopens the spare. The event is logged once per second. When descriptors
+  free up, `on_accept` reopens the reserve and normal accepting resumes (verified
+  by a client registering after the load released). **Fixed this round.** Checked
+  clean under ASan (no fd or memory leak across repeated exhaustion cycles).
+
+### Not checked this round
+
+- The reserve-and-shed is per worker; under a process-wide `ENFILE` several
+  workers contend for freed slots, which is still forward progress but not
+  coordinated. Not stress-tested across many workers at a hard `RLIMIT_NOFILE`.
