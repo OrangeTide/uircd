@@ -90,7 +90,8 @@ overlap and timing does not enumerate names.
 ```sh
 make                                     # optimized miniircd + tool
 ./uircdpasswd alice c secret > /tmp/t.passwd
-cc -O2 -g -std=c11 -D_GNU_SOURCE HARDEN/harness/auth_timing.c -o /tmp/auth_timing
+cc -O2 -g -std=c11 -D_GNU_SOURCE HARDEN/harness/auth_timing.c \
+   -o /tmp/auth_timing -lssl -lcrypto
 
 # Positive: the shipped 120ms deadline exceeds the KDF, so the medians overlap.
 ./miniircd -p 7910 -A /tmp/t.passwd -L >/dev/null 2>&1 &
@@ -106,9 +107,25 @@ printf '[auth]\npasswd = /tmp/t.passwd\nrequire-login = true\n'\
 kill %1
 ```
 
-Expected: `PASS` (exit 0) on the shipped server, `FAIL` (exit 1) on the
-sub-KDF-deadline control. `KNOWN_NAME` must exist in the passwd file with the `c`
-flag and `UNKNOWN_NAME` must not; the 5th argument overrides the 40ms threshold.
+With `-s` the client speaks TLS, for a server started with `-c`/`-k`. The
+handshake runs before the timed section, so the measurement is the same:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/k.pem -out /tmp/c.pem \
+   -days 1 -nodes -subj /CN=irc.test
+./miniircd -p 7697 -A /tmp/t.passwd -L -c /tmp/c.pem -k /tmp/k.pem >/dev/null 2>&1 &
+/tmp/auth_timing -s 7697 alice ghost 200       # expect PASS, gap ~2ms
+kill %1
+```
+
+Expected: `PASS` (exit 0) on the shipped server (plaintext and TLS alike), `FAIL`
+(exit 1) on the sub-KDF-deadline control. `KNOWN_NAME` must exist in the passwd
+file with the `c` flag and `UNKNOWN_NAME` must not; the 5th argument overrides the
+40ms threshold. Note that under a sub-KDF deadline the miss latency is itself
+raised to the deadline-poll floor (the timer re-arms in ~20ms steps), which
+shrinks the measured gap, so the TLS control is run with a tighter threshold
+(e.g. 20) to flag its ~30ms separation; the shipped 120ms deadline leaves a clean
+~2ms gap at the default threshold.
 
 ## tsan_load  (H-007, H-008)
 
