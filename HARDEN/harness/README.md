@@ -78,6 +78,38 @@ Expected on the fixed tree: `survived`, exit 0. Against an engine whose
 `uircd_auth_complete` does not apply the verdict (or that fails to hold input),
 an assertion fails and it exits nonzero.
 
+## auth_timing  (H-003)
+
+A load driver, not a self-contained harness: it needs a running `miniircd`
+started with a passwd file and `-L`. It times a rejected login's first response
+byte for a name that exists (the KDF runs) versus one that does not (no KDF), and
+prints both distributions with a PASS/FAIL verdict on the median gap. With async
+auth the verdict is delivered at a fixed deadline for both, so the medians
+overlap and timing does not enumerate names.
+
+```sh
+make                                     # optimized miniircd + tool
+./uircdpasswd alice c secret > /tmp/t.passwd
+cc -O2 -g -std=c11 -D_GNU_SOURCE HARDEN/harness/auth_timing.c -o /tmp/auth_timing
+
+# Positive: the shipped 120ms deadline exceeds the KDF, so the medians overlap.
+./miniircd -p 7910 -A /tmp/t.passwd -L >/dev/null 2>&1 &
+/tmp/auth_timing 7910 alice ghost 200          # expect PASS, gap ~1ms
+kill %1
+
+# Negative control (shows the test discriminates): an auth deadline below the
+# KDF cost re-exposes the leak. Put it in a config file (a pipe is not seekable).
+printf '[auth]\npasswd = /tmp/t.passwd\nrequire-login = true\n'\
+'auth-deadline-ms = 1\nauth-jitter-ms = 0\n[listen]\nport = 7912\n' > /tmp/fast.conf
+./miniircd -f /tmp/fast.conf >/dev/null 2>&1 &
+/tmp/auth_timing 7912 alice ghost 200          # expect FAIL, gap ~60ms
+kill %1
+```
+
+Expected: `PASS` (exit 0) on the shipped server, `FAIL` (exit 1) on the
+sub-KDF-deadline control. `KNOWN_NAME` must exist in the passwd file with the `c`
+flag and `UNKNOWN_NAME` must not; the 5th argument overrides the 40ms threshold.
+
 ## tsan_load  (H-007, H-008)
 
 A load driver, not a self-contained harness: it needs a running server. Build
