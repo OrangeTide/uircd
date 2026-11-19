@@ -158,3 +158,36 @@ credential.
   copies only, so the mitigation is partial by nature.
 - No disassembly to confirm a given compiler would have kept the plaintext; the
   `secure_wipe` write is non-elidable by construction, which removes the question.
+
+## Round 4 (2026-11-19)
+
+No new finding. This round closed a standing gap: the command handlers had been
+reviewed by hand and with targeted harnesses (H-001, H-004, H-005) but never
+fuzzed. Added `HARDEN/harness/dispatch_fuzz.c`, a randomized driver over the real
+`uircd.c` via `uircd_recv`.
+
+### Observed
+
+- The fuzzer keeps a pool of clients (some registered, some opered) and feeds
+  random command lines: real commands with random-length parameters (some past
+  the `*_MAX` limits), raw control bytes, over-long lines past `INBUF_MAX`, split
+  writes across two `uircd_recv` calls, and pipelines; it ticks the clock to
+  exercise the ping and registration-timeout paths. Client lifetime is tracked
+  exactly (the engine frees a client when it quits it, via `client_quit` ->
+  `drop` -> `client_free`), so the freed pointer is never reused.
+- Ran seven seeds at 300000 iterations each (about 2.1M dispatched lines) under
+  AddressSanitizer + UndefinedBehaviorSanitizer: every run printed `survived`,
+  with no memory error. A separate coverage build confirmed the handlers are
+  genuinely reached, not bounced off as garbage: `cmd_join` ~71%, `cmd_kline`
+  ~75%, `cmd_kill` ~50%, `cmd_nick` ~87%, `cmd_privmsg` 100%, and `cmd_mode`
+  entered. The harness is deterministic per seed and is part of `make check` at
+  its default count.
+
+### Not checked this round
+
+- The fuzzer is a structural randomized generator, not coverage-guided
+  (no libFuzzer/AFL feedback), so it does not steer toward unexecuted branches;
+  `cmd_mode`'s many sub-options in particular are only shallowly covered.
+- It exercises a single engine behind the normal `max_per_ip`-disabled path; it
+  does not drive the threaded host or TLS (covered by the host-net and TLS
+  rounds).

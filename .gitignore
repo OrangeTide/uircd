@@ -5,6 +5,7 @@ HARDEN/harness/kline_self_uaf
 HARDEN/harness/conn_cap
 HARDEN/harness/ban_negation
 HARDEN/harness/async_auth
+HARDEN/harness/dispatch_fuzz
 HARDEN/harness/auth_timing
 HARDEN/harness/tsan_load
 HARDEN/harness/emfile_load

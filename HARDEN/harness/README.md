@@ -78,6 +78,33 @@ Expected on the fixed tree: `survived`, exit 0. Against an engine whose
 `uircd_auth_complete` does not apply the verdict (or that fails to hold input),
 an assertion fails and it exits nonzero.
 
+## dispatch_fuzz  (protocol engine)
+
+Randomized fuzzer for the engine's command dispatch, the richest untrusted-input
+surface: every client can send arbitrary lines that reach
+JOIN/MODE/KICK/KILL/KLINE/WHO/TOPIC and the rest with attacker-chosen
+parameters. It drives the real `uircd.c` through `uircd_recv`, keeping a pool of
+clients (some registered, some opered), and feeds random command lines: real
+commands with random-length parameters, raw bytes, over-long lines, split
+writes, and pipelines. Client lifetime is tracked exactly, since the engine
+frees a client when it quits it, so the freed pointer is never reused. It also
+ticks the clock to exercise the ping and timeout paths.
+
+```sh
+cd HARDEN/harness
+cc -fsanitize=address,undefined -fno-omit-frame-pointer -g -std=c11 \
+   -D_GNU_SOURCE -I../.. dispatch_fuzz.c -o dispatch_fuzz
+./dispatch_fuzz                 # 200000 iterations, seed 1; prints "survived"
+./dispatch_fuzz 300000 42       # more iterations, a different seed
+```
+
+Deterministic for a given seed, so a crash reproduces. It is part of `make
+check` at its default count; the campaign for the round ran several seeds at
+300000 iterations (about 2.1M dispatched lines) with no ASan/UBSan error, and a
+coverage build confirmed the command handlers are actually reached (for example
+cmd_join, cmd_kline, cmd_kill, cmd_nick, cmd_privmsg all execute). Expected:
+`survived`, exit 0.
+
 ## auth_timing  (H-003)
 
 A load driver, not a self-contained harness: it needs a running `miniircd`

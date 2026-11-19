@@ -407,3 +407,23 @@ H-018	NOTE	FIXED	protocol	The engine left a plaintext password in its input buff
   buffer, OpenSSL decrypt buffer, the host recv buffer passed to uircd_recv) are
   not reachable from the engine and are not wiped, so the mitigation is partial
   by design; no disassembly (secure_wipe is non-elidable by construction).
+
+- 2026-11-19, round 21 (dispatch fuzzing, no finding, `tree:round-21`). Closed a
+  standing gap: the engine's command handlers, the richest untrusted-input
+  surface, had been reviewed by hand and with targeted harnesses (H-001, H-004,
+  H-005) but never fuzzed. Added HARDEN/harness/dispatch_fuzz.c, a randomized
+  driver over the real uircd.c via uircd_recv: a pool of clients (some
+  registered, some opered) fed random command lines (real commands with
+  random-length params, raw bytes, over-long lines, split writes, pipelines),
+  with exact client-lifetime tracking and periodic ticks. Seven seeds at 300000
+  iterations each (about 2.1M dispatched lines) under ASan+UBSan all printed
+  survived with no memory error, and a coverage build confirmed the handlers are
+  actually reached (cmd_join ~71%, cmd_kline ~75%, cmd_kill ~50%, cmd_nick ~87%,
+  cmd_privmsg 100%, cmd_mode entered). The harness is deterministic per seed and
+  was added to make check at its default count (check now runs five harnesses,
+  all survived). No finding: the ledger block is unchanged, so the report stays
+  current.
+  Not checked this round: the fuzzer is structural, not coverage-guided (no
+  libFuzzer/AFL), so deep branches like cmd_mode's sub-options are only shallowly
+  covered; it drives one engine, not the threaded host or TLS (covered by the
+  host-net and TLS rounds).
