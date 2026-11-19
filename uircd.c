@@ -596,15 +596,20 @@ client_field_match(struct uircd_client *c, const struct term *t)
     }
 }
 
+/* A single term's verdict, honoring a '!=' negation. */
+static int
+term_matches(struct uircd_client *c, const struct term *t)
+{
+    int m = client_field_match(c, t);
+    return t->negate ? !m : m;
+}
+
 static int
 client_matches(struct uircd_client *c, const struct term *terms, int n)
 {
     int i;
     for (i = 0; i < n; i++) {
-        int m = client_field_match(c, &terms[i]);
-        if (terms[i].negate)
-            m = !m;
-        if (!m)
+        if (!term_matches(c, &terms[i]))
             return 0;
     }
     return n > 0;
@@ -1731,7 +1736,7 @@ client_banned(struct uircd *s, struct uircd_client *c, const char **why)
 {
     unsigned i;
     for (i = 0; i < s->n_bans; i++) {
-        if (client_field_match(c, &s->bans[i].term)) {
+        if (term_matches(c, &s->bans[i].term)) {
             if (why)
                 *why = s->bans[i].reason;
             return 1;
@@ -1946,7 +1951,7 @@ uircd_ban_add(struct uircd *s, const char *spec, const char *reason)
     if (!victims)
         return killed; /* ban is recorded; matches drop on reconnect */
     for (i = 0; i < s->n_clients; i++) {
-        if (client_field_match(s->clients[i], &b.term))
+        if (term_matches(s->clients[i], &b.term))
             victims[nv++] = s->clients[i];
     }
     for (i = 0; i < (unsigned)nv; i++) {

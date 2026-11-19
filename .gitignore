@@ -3,3 +3,4 @@
 /uircdpasswd
 HARDEN/harness/kline_self_uaf
 HARDEN/harness/conn_cap
+HARDEN/harness/ban_negation

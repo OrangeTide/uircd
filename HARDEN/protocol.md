@@ -85,4 +85,21 @@ connected client, and for the oper-gated commands, an authenticated operator.
   or reject a negated spec in `uircd_ban_add`. **Accepted** this round and
   recorded; negated bans are an uncommon admin input and the behaviour is
   documented here rather than silently wrong in code. Recorded ACCEPTED in the
-  ledger.
+  ledger. (Closed in round 2 below, finding 4.)
+
+## Round 2 (2026-11-18)
+
+### 4. Negated ban specs now apply the negation  [H-005]
+
+- **What changed:** a single helper `term_matches(c, t)` now computes a term's
+  verdict and flips it when `t->negate` is set. `client_matches` (always
+  honored negation), `client_banned`, and `uircd_ban_add` all go through it, so
+  bans and the GKILL/KILL query path share one definition. A negated KLINE spec
+  now bans the complement set it names, instead of the set it excludes.
+- **Lines:** uircd.c `term_matches` (new); uircd.c `client_banned`; uircd.c
+  `uircd_ban_add`; uircd.c `client_matches`.
+- **Falsifier:** `HARDEN/harness/ban_negation.c`, built and run under ASan+UBSan
+  this round. With `keep` and `other` connected it adds `nick!=keep` and asserts
+  `other` is removed and `keep` stays. Prints `survived`. Discriminates: before
+  the fix the ban removed `keep`, so the assertions abort.
+- **State:** **FIXED.**

@@ -37,6 +37,11 @@ TOOL_OBJS   = tools/uircdpasswd.o $(EX)/b64.o
 
 BINS = miniircd uircdpasswd
 
+HARNESS_DIR = HARDEN/harness
+HARNESSES   = kline_self_uaf conn_cap ban_negation
+HARNESS_SAN = -fsanitize=address,undefined -fno-omit-frame-pointer \
+              -fno-sanitize-recover=undefined
+
 all: $(BINS)
 
 miniircd: $(LIB_OBJS) $(IOX_OBJS) $(SCRYPT_OBJS) $(EX_OBJS)
@@ -56,8 +61,26 @@ $(SCRYPT_DIR)/%.o: $(SCRYPT_DIR)/%.c
 sanitize:
 	$(MAKE) SANITIZE=1
 
+# Build and run every HARDEN falsifier under ASan+UBSan. Each must print
+# "survived"; any other output or a nonzero exit fails the check.
+check:
+	@fail=0; \
+	for h in $(HARNESSES); do \
+	    echo "=== $$h ==="; \
+	    $(CC) $(HARNESS_SAN) -g -std=c11 -D_GNU_SOURCE -I. \
+	        $(HARNESS_DIR)/$$h.c -o $(HARNESS_DIR)/$$h || { fail=1; continue; }; \
+	    out=`$(HARNESS_DIR)/$$h`; rc=$$?; \
+	    echo "$$out"; \
+	    if [ $$rc -ne 0 ] || [ "$$out" != survived ]; then \
+	        echo "FAIL: $$h (exit $$rc)"; fail=1; \
+	    fi; \
+	done; \
+	if [ $$fail -eq 0 ]; then echo "ALL HARNESSES: survived"; \
+	else echo "CHECK FAILED"; exit 1; fi
+
 clean:
 	rm -f $(BINS) $(LIB_OBJS) $(IOX_OBJS) $(SCRYPT_OBJS) \
-	    $(EX_OBJS) $(TOOL_OBJS)
+	    $(EX_OBJS) $(TOOL_OBJS) \
+	    $(addprefix $(HARNESS_DIR)/,$(HARNESSES))
 
-.PHONY: all sanitize clean
+.PHONY: all sanitize check clean

@@ -3,7 +3,10 @@
 Each harness includes the real source it tests and stubs the rest, and is built
 under AddressSanitizer and UndefinedBehaviorSanitizer. A harness prints
 `survived` when the finding it targets is fixed, and reproduces the fault
-(an ASan/UBSan abort) while it is open.
+(an ASan/UBSan abort, or a failed assertion) while it is open.
+
+`make check` from the repository root builds and runs every harness and reports
+whether each printed `survived`.
 
 ## kline_self_uaf  (H-001)
 
@@ -37,3 +40,19 @@ cc -fsanitize=address,undefined -fno-omit-frame-pointer -g -std=c11 \
 
 Expected on the fixed tree: `survived`, exit 0. Without the cap or the deadline
 one of the harness assertions aborts.
+
+## ban_negation  (H-005)
+
+Checks that a negated ban spec (`nick!=keep`) removes the complement set. Adds
+the ban with two clients connected, `keep` and `other`, and asserts `other` is
+the one removed. Before the fix the ban ignored the negation and removed `keep`.
+
+```sh
+cd HARDEN/harness
+cc -fsanitize=address,undefined -fno-omit-frame-pointer -g -std=c11 \
+   -D_GNU_SOURCE -I../.. ban_negation.c -o ban_negation
+./ban_negation     # prints "survived" when H-005 is fixed
+```
+
+Expected on the fixed tree: `survived`, exit 0. On the pre-fix tree the
+assertions abort because the wrong client was removed.

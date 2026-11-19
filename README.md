@@ -108,8 +108,7 @@ GKILL nick=bot* user=~*              drop every unidented bot*
 GKILL chan=#spam real=*VirusBot*     drop spammers in one channel
 ```
 
-(Note: KLINE bans currently treat `field!=glob` as a positive match; see
-`HARDEN.md` H-005. GKILL honors negation.)
+Both KLINE bans and GKILL honor a `field!=glob` negation.
 
 ## Security
 
