@@ -20,6 +20,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <signal.h>
@@ -736,13 +737,11 @@ read_file(const char *path)
 struct hostconf {
     int port, use6, nthreads, daemon, require_login;
     char *cert, *key, *passwd, *srvname, *network, *motd_path;
+    unsigned handshake_timeout_s;   /* host-side TLS handshake deadline */
 
-    /* seconds / counts; 0 means "leave the default". */
-    unsigned handshake_timeout_s;   /* host */
-    unsigned max_per_ip, reg_timeout_s;             /* engine */
-    unsigned max_clients, max_channels;             /* engine */
-    unsigned ping_interval_s, ping_timeout_s;       /* engine */
-    unsigned flood_lines, flood_window_s;           /* engine */
+    /* Engine limits are accumulated here through the library's own string
+     * setter (see the [limits] handlers), rather than poking struct fields. */
+    struct uircd_config cfg;
 };
 
 static void
@@ -783,6 +782,30 @@ parse_bool(const char *v)
             !strcasecmp(v, "on") || !strcmp(v, "1"));
 }
 
+/* Apply an engine limit through the library's string setter. These dogfood
+ * uircd_config_set rather than assigning struct fields directly. Counts pass
+ * through unchanged; the host's friendly seconds are converted to the library's
+ * millisecond keys. Returns 0, or -1 on a bad value. */
+static int
+engine_count(struct hostconf *hc, const char *libkey, const char *val)
+{
+    return uircd_config_set(&hc->cfg, libkey, val) == UIRCD_OK ? 0 : -1;
+}
+
+static int
+engine_secs(struct hostconf *hc, const char *libkey_ms, const char *val)
+{
+    char *end, buf[32];
+    unsigned long s;
+
+    errno = 0;
+    s = strtoul(val, &end, 10);
+    if (!*val || errno != 0 || *end != '\0' || s > UINT_MAX / 1000u)
+        return -1;
+    snprintf(buf, sizeof(buf), "%lu", s * 1000u);
+    return uircd_config_set(&hc->cfg, libkey_ms, buf) == UIRCD_OK ? 0 : -1;
+}
+
 /* Apply one "section.name = value" setting. Returns 0, or -1 for an unknown
  * key or a bad value. */
 static int
@@ -803,22 +826,14 @@ hostconf_set(struct hostconf *hc, const char *sec, const char *name,
     if (MATCH("auth", "require-login"))
         { hc->require_login = parse_bool(val); return 0; }
     if (MATCH("limits", "threads")) { hc->nthreads = atoi(val); return 0; }
-    if (MATCH("limits", "max-per-ip"))
-        { hc->max_per_ip = (unsigned)atoi(val); return 0; }
-    if (MATCH("limits", "reg-timeout"))
-        { hc->reg_timeout_s = (unsigned)atoi(val); return 0; }
-    if (MATCH("limits", "max-clients"))
-        { hc->max_clients = (unsigned)atoi(val); return 0; }
-    if (MATCH("limits", "max-channels"))
-        { hc->max_channels = (unsigned)atoi(val); return 0; }
-    if (MATCH("limits", "ping-interval"))
-        { hc->ping_interval_s = (unsigned)atoi(val); return 0; }
-    if (MATCH("limits", "ping-timeout"))
-        { hc->ping_timeout_s = (unsigned)atoi(val); return 0; }
-    if (MATCH("limits", "flood-lines"))
-        { hc->flood_lines = (unsigned)atoi(val); return 0; }
-    if (MATCH("limits", "flood-window"))
-        { hc->flood_window_s = (unsigned)atoi(val); return 0; }
+    if (MATCH("limits", "max-per-ip"))   return engine_count(hc, "max-per-ip", val);
+    if (MATCH("limits", "max-clients"))  return engine_count(hc, "max-clients", val);
+    if (MATCH("limits", "max-channels")) return engine_count(hc, "max-channels", val);
+    if (MATCH("limits", "flood-lines"))  return engine_count(hc, "flood-lines", val);
+    if (MATCH("limits", "reg-timeout"))  return engine_secs(hc, "reg-timeout-ms", val);
+    if (MATCH("limits", "ping-interval"))return engine_secs(hc, "ping-interval-ms", val);
+    if (MATCH("limits", "ping-timeout")) return engine_secs(hc, "ping-timeout-ms", val);
+    if (MATCH("limits", "flood-window")) return engine_secs(hc, "flood-window-ms", val);
 #undef MATCH
     return -1;
 }
@@ -879,7 +894,7 @@ load_config(const char *path, struct hostconf *hc)
         key = trim(s);
         val = trim(eq + 1);
         if (hostconf_set(hc, section, key, val) != 0) {
-            fprintf(stderr, "config %s:%d: unknown setting '%s.%s'\n",
+            fprintf(stderr, "config %s:%d: bad or unknown setting '%s.%s'\n",
                     path, lineno, section, key);
             rc = -1;
         }
@@ -929,8 +944,8 @@ apply_opt(struct hostconf *hc, int opt, const char *arg)
     case 'n': if (set_str(&hc->srvname, arg)) return -1; break;
     case 'N': if (set_str(&hc->network, arg)) return -1; break;
     case 'm': if (set_str(&hc->motd_path, arg)) return -1; break;
-    case 'P': hc->max_per_ip = (unsigned)atoi(arg); break;
-    case 'R': hc->reg_timeout_s = (unsigned)atoi(arg); break;
+    case 'P': if (engine_count(hc, "max-per-ip", arg)) return -1; break;
+    case 'R': if (engine_secs(hc, "reg-timeout-ms", arg)) return -1; break;
     case 'H': hc->handshake_timeout_s = (unsigned)atoi(arg); break;
     case 'd': hc->daemon = 1; break;
     default: return -1;
@@ -986,8 +1001,6 @@ main(int argc, char **argv)
         }
     }
 
-    memset(&cfg, 0, sizeof(cfg));
-
     if (hc.port <= 0 || hc.port > 65535) {
         fprintf(stderr, "invalid port\n");
         hostconf_free(&hc);
@@ -1037,19 +1050,14 @@ main(int argc, char **argv)
         return 1;
     }
 
+    /* start from the engine limits accumulated through uircd_config_set, then
+     * fill in the fields the host owns directly */
+    cfg = hc.cfg;
     cfg.server_name = hc.srvname;
     cfg.network = hc.network;
     cfg.motd = motd;
     cfg.version = "uircd-1.0";
     cfg.require_login = hc.require_login;
-    cfg.max_per_ip = hc.max_per_ip;
-    cfg.reg_timeout_ms = hc.reg_timeout_s * 1000u;
-    cfg.max_clients = hc.max_clients;
-    cfg.max_channels = hc.max_channels;
-    cfg.ping_interval_ms = hc.ping_interval_s * 1000u;
-    cfg.ping_timeout_ms = hc.ping_timeout_s * 1000u;
-    cfg.flood_lines = hc.flood_lines;
-    cfg.flood_window_ms = hc.flood_window_s * 1000u;
     cfg.out = on_out;
     cfg.drop = on_drop;
     cfg.auth = hc.passwd ? auth_verify : NULL;
