@@ -195,3 +195,38 @@ This round verified it and found it wrong.
 - The reserve-and-shed is per worker; under a process-wide `ENFILE` several
   workers contend for freed slots, which is still forward progress but not
   coordinated. Not stress-tested across many workers at a hard `RLIMIT_NOFILE`.
+
+## Round 5 (2026-11-18) -- TLS handshake paths under TSan
+
+Round 3's TSan run was plaintext, leaving the TLS handshake and handshake-close
+paths unverified under a race detector. This round closed that gap. No finding:
+the paths are clean.
+
+### Observed
+
+- Built the host under ThreadSanitizer (`make tsan`) with a self-signed cert and
+  drove it with `HARDEN/harness/tls_load.c` across 4 and 6 workers. The driver
+  mixes four connection modes so both the success and the failure handshake
+  paths run: full TLS with a clean `QUIT`/`SSL_shutdown`; full TLS with the
+  socket dropped mid-flight; non-TLS garbage to the TLS port (handshake error,
+  `close_conn` while `handshaking`); and an immediate TCP abort before the
+  handshake completes.
+- Over roughly 1200 connections per run, about 600 completed the handshake and
+  registered (`connect` == `register` == `quit` == 599 in one run); the other
+  modes drove `drive_handshake`'s error and close paths without registering.
+- ThreadSanitizer reported **0 warnings** across both runs.
+
+### Judged
+
+- No new finding. The handshake close paths go through the same `on_io` ->
+  `on_writable`/`on_readable` -> `close_conn` dispatch that H-007 fixed, and the
+  `drive_handshake` branches in `on_readable`/`on_writable` both `return`
+  immediately after a close, so the `io_cur_freed` guard in `on_io` covers them.
+  This run is the evidence that the guard holds for the TLS paths, not only the
+  plaintext ones.
+
+### Not checked this round
+
+- No TLS record-layer fuzzing (malformed records, fragmentation, renegotiation
+  attempts); OpenSSL is still trusted as the record-layer boundary. The driver
+  speaks well-formed TLS or plain garbage, not adversarially malformed records.

@@ -86,3 +86,16 @@ H-009	WARN	FIXED	host-net	Descriptor-exhaustion busy-loop: on accept() returning
   Not checked this round: the reserve-and-shed was not stress-tested across many
   workers at a hard process-wide `RLIMIT_NOFILE`; TLS record-layer fuzzing and
   TSan coverage of the TLS handshake close paths remain open.
+
+- 2026-11-18, round 5 (verification only, no code change). Scope: close the
+  round-3 gap that the TSan run was plaintext. Built under `make tsan` with a
+  self-signed cert and drove TLS load with `HARDEN/harness/tls_load.c` (four
+  connection modes: clean TLS, mid-flight drop, non-TLS garbage, and immediate
+  abort) across 4 and 6 workers, ~1200 connections per run. ThreadSanitizer
+  reported 0 warnings; about 600 sessions per run completed the handshake and
+  registered, the rest drove `drive_handshake`'s error and close paths. No new
+  finding: the handshake close paths share the H-007 `on_io`/`close_conn` guard,
+  now shown clean for TLS as well. The ledger block is unchanged, so the report
+  is unchanged.
+  Not checked this round: no TLS record-layer fuzzing (malformed/fragmented
+  records, renegotiation); OpenSSL remains the trusted record-layer boundary.
