@@ -39,6 +39,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -120,6 +121,34 @@ cmp_double(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
+/* One concurrent sampler: it runs its own share of the samples on its own
+ * connections, writing into private slices so no lock is needed. */
+struct worker {
+    pthread_t thread;
+    int port, want;
+    const char *known, *unknown;
+    SSL_CTX *ctx;
+    double *tk, *tu;   /* private slices, each sized `want` */
+    int nk, nu;
+};
+
+static void *
+worker_run(void *arg)
+{
+    struct worker *w = arg;
+    int i;
+
+    for (i = 0; i < w->want; i++) {
+        double a = sample(w->port, w->known, w->ctx);
+        double b = sample(w->port, w->unknown, w->ctx);
+        if (a >= 0)
+            w->tk[w->nk++] = a;
+        if (b >= 0)
+            w->tu[w->nu++] = b;
+    }
+    return NULL;
+}
+
 struct stats {
     double median, mean, lo, hi;
     int n;
@@ -145,27 +174,33 @@ summarize(double *v, int n)
 int
 main(int argc, char **argv)
 {
-    int port, want, i, opt, use_tls = 0;
+    int port, want, i, opt, use_tls = 0, conc = 1, total;
     const char *known, *unknown;
     double threshold = 40.0;   /* ms; well below a KDF-sized (~60ms) leak */
     double *tk, *tu;
     int nk = 0, nu = 0;
+    struct worker *ws;
     struct stats sk, su;
     double gap;
     SSL_CTX *ctx = NULL;
 
-    while ((opt = getopt(argc, argv, "s")) != -1) {
+    while ((opt = getopt(argc, argv, "sc:")) != -1) {
         if (opt == 's')
             use_tls = 1;
+        else if (opt == 'c')
+            conc = atoi(optarg);
         else
             return 2;
     }
     if (argc - optind < 4) {
         fprintf(stderr,
-            "usage: %s [-s] PORT KNOWN_NAME UNKNOWN_NAME SAMPLES [THRESHOLD_MS]\n"
+            "usage: %s [-s] [-c N] PORT KNOWN_NAME UNKNOWN_NAME SAMPLES"
+            " [THRESHOLD_MS]\n"
             "  -s           speak TLS (server started with -c/-k)\n"
-            "  KNOWN_NAME must exist in the server's passwd file (with 'c');\n"
-            "  UNKNOWN_NAME must not. The server must run with -L.\n", argv[0]);
+            "  -c N         run N concurrent samplers (default 1)\n"
+            "  SAMPLES is per sampler, per case; KNOWN_NAME must exist in the\n"
+            "  passwd file (with 'c'), UNKNOWN_NAME must not. Run server with -L.\n",
+            argv[0]);
         return 2;
     }
     port = atoi(argv[optind]);
@@ -176,6 +211,8 @@ main(int argc, char **argv)
         threshold = atof(argv[optind + 4]);
     if (want < 1)
         want = 1;
+    if (conc < 1)
+        conc = 1;
 
     signal(SIGPIPE, SIG_IGN);
     if (use_tls) {
@@ -188,26 +225,45 @@ main(int argc, char **argv)
          * authenticate the peer, so verification is intentionally off. */
         SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
     }
-    tk = calloc((size_t)want, sizeof(*tk));
-    tu = calloc((size_t)want, sizeof(*tu));
-    if (!tk || !tu) {
+
+    /* conc samplers, each with its own connections and private result slices;
+     * at any instant up to conc logins of each case are in flight, which is the
+     * concurrent load the KDF pool must absorb within the deadline. */
+    total = conc * want;
+    tk = calloc((size_t)total, sizeof(*tk));
+    tu = calloc((size_t)total, sizeof(*tu));
+    ws = calloc((size_t)conc, sizeof(*ws));
+    if (!tk || !tu || !ws) {
         fprintf(stderr, "out of memory\n");
         return 2;
     }
-
-    /* Interleave the two cases so any drift in load hits both equally. */
-    for (i = 0; i < want; i++) {
-        double a = sample(port, known, ctx);
-        double b = sample(port, unknown, ctx);
-        if (a >= 0)
-            tk[nk++] = a;
-        if (b >= 0)
-            tu[nu++] = b;
+    for (i = 0; i < conc; i++) {
+        ws[i].port = port;
+        ws[i].known = known;
+        ws[i].unknown = unknown;
+        ws[i].ctx = ctx;
+        ws[i].want = want;
+        ws[i].tk = tk + (size_t)i * want;
+        ws[i].tu = tu + (size_t)i * want;
     }
-    if (nk < want / 2 || nu < want / 2) {
+    for (i = 0; i < conc; i++) {
+        if (pthread_create(&ws[i].thread, NULL, worker_run, &ws[i]) != 0) {
+            fprintf(stderr, "pthread_create failed\n");
+            return 2;
+        }
+    }
+    for (i = 0; i < conc; i++) {
+        pthread_join(ws[i].thread, NULL);
+        memmove(tk + nk, ws[i].tk, (size_t)ws[i].nk * sizeof(*tk));
+        nk += ws[i].nk;
+        memmove(tu + nu, ws[i].tu, (size_t)ws[i].nu * sizeof(*tu));
+        nu += ws[i].nu;
+    }
+    free(ws);
+    if (nk < total / 2 || nu < total / 2) {
         fprintf(stderr, "too many failed samples (known %d/%d, unknown %d/%d);"
                 " is the server up with -L and the passwd file?\n",
-                nk, want, nu, want);
+                nk, total, nu, total);
         return 2;
     }
 

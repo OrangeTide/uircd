@@ -145,3 +145,41 @@ implementation changed and the one concurrency defect it surfaced.
 - No standalone cross-worker PING-RTT harness for H-012: the off-lock property is
   structural (`auth_compute` takes no engine lock) and TSan-confirmed.
 - The vendored scrypt and its parameters were not otherwise re-audited.
+
+## Round 4 (2026-11-19)
+
+Measured the H-003 equalization empirically with `HARDEN/harness/auth_timing.c`
+(rounds 14-15: plaintext then TLS, both overlapping within ~2ms on the shipped
+server) and then under concurrent login load (round 16). The concurrency sweep
+surfaced one bounded residual.
+
+### Judged
+
+#### 3. Timing equalization frays under a login flood that saturates the pool  [H-014]
+
+- **Observed:** with `auth_timing.c -c N` against the shipped 2-thread KDF pool,
+  the known-bad and unknown medians track each other (gap <3ms at 1-8 concurrent,
+  ~24-29ms at 16-32) because once the pool backs up both paths are delayed
+  together by the shared event loop, lock, and deadline-timer delivery. At 64
+  concurrent, where every login takes ~1s near the fail-closed poll cap, a ~97ms
+  known-vs-unknown gap re-emerges.
+- **Scenario:** an attacker floods known-bad logins hard enough to saturate the
+  KDF pool and times responses, hoping the known path's queueing re-exposes which
+  names exist.
+- **Falsifier:** within the pool's deadline capacity the median gap stays within
+  threshold; measured <3ms to 8 concurrent and ~24-29ms to 32 on the 2-thread
+  pool, exceeding only at ~64 concurrent (~97ms), and back to ~0ms at 16
+  concurrent once `kdf-threads` is raised to 8.
+- **Judgment (ACCEPTED):** the gap appears only inside the login-flood,
+  bounded-CPU regime H-012/H-013 already accept (the server is fail-closing logins
+  by then), the ~97ms signal is buried in ~1s of latency and high variance, and
+  the mitigation is configuration: provision `kdf-threads` for the expected
+  concurrent-login rate. H-003 remains FIXED for the at-rest enumeration it names;
+  H-014 is the distinct under-saturation residual.
+
+### Not checked this round
+
+- The sweep was localhost plaintext; TLS or a real network adds latency to both
+  paths, widening overlap rather than the gap.
+- The deepest saturation (fail-closed rejections) was characterized by response
+  latency, not by counting how many logins were rejected.

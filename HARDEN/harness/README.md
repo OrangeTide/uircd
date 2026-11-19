@@ -91,7 +91,7 @@ overlap and timing does not enumerate names.
 make                                     # optimized miniircd + tool
 ./uircdpasswd alice c secret > /tmp/t.passwd
 cc -O2 -g -std=c11 -D_GNU_SOURCE HARDEN/harness/auth_timing.c \
-   -o /tmp/auth_timing -lssl -lcrypto
+   -o /tmp/auth_timing -lpthread -lssl -lcrypto
 
 # Positive: the shipped 120ms deadline exceeds the KDF, so the medians overlap.
 ./miniircd -p 7910 -A /tmp/t.passwd -L >/dev/null 2>&1 &
@@ -126,6 +126,20 @@ raised to the deadline-poll floor (the timer re-arms in ~20ms steps), which
 shrinks the measured gap, so the TLS control is run with a tighter threshold
 (e.g. 20) to flag its ~30ms separation; the shipped 120ms deadline leaves a clean
 ~2ms gap at the default threshold.
+
+`-c N` runs N concurrent samplers to measure the gap under concurrent login load
+(H-014). Give the server a high `-P` so the per-IP cap does not refuse the load:
+
+```sh
+./miniircd -p 7920 -t 4 -A /tmp/t.passwd -L -P 1000 >/dev/null 2>&1 &
+/tmp/auth_timing -c 8  7920 alice ghost 40     # within pool capacity: gap ~1ms
+/tmp/auth_timing -c 64 7920 alice ghost 30     # saturated: both ~1s, gap grows
+kill %1
+```
+
+On the default 2-thread pool the gap stays small through moderate concurrency
+and only separates at deep saturation (near the fail-closed cap); raising
+`[auth] kdf-threads` to cover the concurrent-login rate keeps it at ~0ms.
 
 ## tsan_load  (H-007, H-008)
 

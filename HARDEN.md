@@ -26,6 +26,7 @@ H-010	WARN	FIXED	host-net	Half-open TLS handshakes were unbounded: a connection 
 H-011	WARN	FIXED	host-net	The EMFILE reserve-shed busy-looped under a hard process-wide RLIMIT_NOFILE with multiple workers. On exhaustion each worker freed its reserved fd to accept-and-close its backlog, but N workers share one fd table, so a worker that lost the race to reopen its reserve had no slot to shed with and respun the still-readable listener. H-009 bounded the single-worker case; this is the multi-worker process-wide case, measured with all four workers pegged (process CPU ~400 ticks/sec) under sustained exhaustion	example/miniircd.c on_accept (EMFILE branch); example/miniircd.c on_relisten	HARDEN/harness/emfile_load.c against a 4-worker server under a hard ulimit (ulimit -n 96): process utime+stime over a 4s exhaustion window is ~1600 ticks (all workers pegged) before the fix and ~2 after; the fix pauses the listener with iox_fd_mod(...,0) and re-arms it after a 100ms backoff timer (on_relisten), and a client is served once descriptors free	HARDEN/host-net.md#10	tree:round-10
 H-012	WARN	FIXED	auth	The scrypt KDF ran under the single global lock: on_readable held g_lock across uircd_recv -> cmd_pass/cmd_oper -> cfg.auth, so the ~61ms scrypt ran while holding g_lock and one login stalled every worker. Reachable with no secret (a bare PASS matches a shared * entry). Fixed: cmd_pass/cmd_oper return UIRCD_AUTH_PENDING, the host runs the KDF in a bounded pool with no lock held, and the verdict is applied later via uircd_auth_complete	example/miniircd.c on_auth (enqueue, no KDF under lock), kdf_main (auth_compute off-lock); uircd.c cmd_pass, cmd_oper (PENDING), uircd_auth_complete	A registered observer PING RTT stays within normal bounds while a login flood is in flight; satisfied structurally (auth_compute holds no engine lock) and confirmed by a TSan run showing the KDF pool runs off g_lock with 0 races; dedicated RTT harness not run	HARDEN/auth.md#2	tree:round-12
 H-013	OPP	FIXED	auth	Asynchronous authentication: run the KDF off the global lock in a bounded pool and deliver the login verdict at a scheduled deadline with jitter, closing both the timing enumeration (H-003) and the global-lock stall (H-012) without a decoy-KDF DoS. Implemented: UIRCD_AUTH_PENDING + uircd_auth_complete in the engine (holding the client's input until the verdict), and a bounded KDF thread pool, deadline timer, and {worker,auth_id} lifetime token in the host	uircd.h (UIRCD_AUTH_PENDING, uircd_auth_complete); uircd.c cmd_pass, cmd_oper, uircd_auth_complete, feed_bytes/hold; example/miniircd.c on_auth, kdf_main, on_auth_deadline, auth_warmup; example/auth.c auth_lookup/auth_compute	HARDEN/harness/async_auth.c drives the real uircd.c through UIRCD_AUTH_PENDING/uircd_auth_complete and prints "survived": a deferred accept replays held NICK/USER to register, a deferred reject drops the client, hold-cap overflow drops it, a close mid-pending frees the hold buffer, and a deferred OPER grants on accept, all under ASan+UBSan (verified to FAIL on an engine whose uircd_auth_complete is a no-op). An unknown-name flood costs ~no server CPU (auth_compute skips scrypt on a miss); engine, host, and KDF pool also ran clean under TSan (0 races, 0 leaks) over concurrent logins including mid-auth closes	HARDEN/DESIGN-async-auth.md	tree:round-13
+H-014	NOTE	ACCEPTED	auth	The H-003 login-timing equalization frays under a sustained login flood that saturates the KDF pool. As offered known-bad logins (which run scrypt) exceed the pool's within-deadline capacity both paths degrade together, so the gap stays small over a wide range (measured <3ms up to 8 concurrent, ~24-29ms at 16-32 concurrent on the default 2-thread pool), but at extreme saturation near the fail-closed poll cap (~64 concurrent, every login ~1s) a ~97ms known-vs-unknown separation re-emerges. Accepted: it appears only in the login-flood/bounded-CPU regime H-012/H-013 already accept (the server is fail-closing logins by then) with the signal buried in ~1s latency, and provisioning kdf-threads to the concurrent-login rate removes it	example/miniircd.c on_auth_deadline (poll re-arm when the pool is backed up); example/miniircd.c kdf_main (pool throughput)	HARDEN/harness/auth_timing.c -c N: within the pool's deadline capacity the known-bad vs unknown median gap stays within threshold (measured <3ms to 8 concurrent, ~24-29ms to 32 on the 2-thread pool); it exceeds only under extreme saturation (~97ms at 64 concurrent) and returns to ~0ms when kdf-threads is raised to cover the concurrency (measured ~0ms at 16 concurrent with 8 threads)	HARDEN/auth.md#3	-
 ```
 
 ## Round log
@@ -296,3 +297,25 @@ H-013	OPP	FIXED	auth	Asynchronous authentication: run the KDF off the global loc
   not part of `make check`. No code or finding change.
   Not run this round: no measurement over a real (non-loopback) network or under
   concurrent login load; both only add transport jitter, which widens overlap.
+
+- 2026-11-19, round 16 (measurement, `tree:round-16`). Closed round 15's "not run
+  under concurrent login load" note by adding a `-c N` concurrency mode to
+  `auth_timing.c` (N sampler threads on their own connections) and sweeping it.
+  Result on the shipped 2-thread KDF pool (4 workers, 120ms deadline, -P raised so
+  the per-IP cap does not refuse the load): the known-bad and unknown medians
+  track each other across a wide range, gap <3ms at 1-8 concurrent and ~24-29ms at
+  16-32, because once the pool is backed up both paths are delayed together by the
+  shared event loop, lock, and deadline-timer delivery, not just the KDF path. A
+  measurable gap (~97ms) re-emerges only at extreme saturation (64 concurrent,
+  every login ~1s, near the fail-closed poll cap); raising kdf-threads to 8
+  returns the 16-concurrent gap to ~0ms. Recorded that residual as H-014 (NOTE,
+  ACCEPTED): it lives entirely in the login-flood/bounded-CPU regime H-012/H-013
+  already accept, the signal is buried in ~1s latency, and the mitigation is
+  configuration (provision kdf-threads for the concurrent-login rate). H-003 stays
+  FIXED: the at-rest enumeration it names is closed; H-014 is the distinct
+  under-saturation residual. The harness now also links `-lpthread`; it stays a
+  documented driver, not part of `make check`.
+  Not run this round: the sweep was localhost plaintext; TLS or a real network
+  adds transport latency to both paths (widening overlap, not the gap), and the
+  deepest saturation point (fail-closed rejections) was characterized by latency,
+  not by counting rejected logins.
