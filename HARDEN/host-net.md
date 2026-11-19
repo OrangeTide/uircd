@@ -319,3 +319,37 @@ parser of untrusted-shaped bytes, so it was checked for memory safety.
 - The fuzzer is a structural generator, not coverage-guided; a libFuzzer or AFL
   harness over `load_config` in isolation would explore more paths. The config
   file remains trusted local operator input, so this was judged sufficient.
+
+## Round 9 (2026-11-18) -- TLS renegotiation and fragmentation
+
+Closed round 6's remaining gap: no renegotiation or fragmentation fuzzing. The
+record layer is OpenSSL's and trusted; the target is miniircd's own non-blocking
+`SSL_read`/`SSL_write` loops and the handshake driver.
+
+### Observed
+
+- `tls_init` sets a TLS 1.2 floor, `SSL_OP_NO_RENEGOTIATION`, and server cipher
+  preference. TLS 1.3 is allowed (no max version pinned).
+- Drove the TLS port with `HARDEN/harness/tls_reneg.c` across 4 workers, 1000
+  connections per run, in five modes: a TLS 1.2 client-initiated renegotiation,
+  a TLS 1.3 key update, record fragmentation (smallest 512-byte fragment plus
+  3-byte writes), one-byte-per-record writes, and a renegotiation flood. Closes
+  mixed clean and abrupt.
+- Under ASan+UBSan (`detect_leaks=1`): 0 reports, no crash, no CPU peg, and the
+  server kept serving legitimate TLS clients. Under TSan: 0 warnings.
+
+### Judged
+
+- No finding. The renegotiation policy holds: a focused probe confirmed that a
+  client's TLS 1.2 `SSL_renegotiate()` + `SSL_do_handshake()` is refused by the
+  server (the second handshake returns `SSL_ERROR_SSL`, not success), so
+  renegotiation-based plaintext injection and reneg-flood CPU abuse are off the
+  table. Fragmented and one-byte records are reassembled by OpenSSL and consumed
+  by the engine a line at a time through the existing `SSL_read` loop with no
+  mishandling. TLS 1.3 key updates are handled transparently.
+
+### Not checked this round
+
+- The record layer itself (malformed/overlapping/compressed records, alert
+  flooding at the byte level) was not fuzzed below the OpenSSL API; OpenSSL
+  remains the trusted record-layer boundary.

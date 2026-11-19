@@ -9,3 +9,4 @@ HARDEN/harness/emfile_load
 HARDEN/harness/tls_load
 HARDEN/harness/tls_fuzz
 HARDEN/harness/conf_fuzz
+HARDEN/harness/tls_reneg

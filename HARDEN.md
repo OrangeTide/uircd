@@ -158,3 +158,19 @@ H-010	WARN	FIXED	host-net	Half-open TLS handshakes were unbounded: a connection 
   Not checked this round: the fuzzer is a structural generator, not
   coverage-guided (no libFuzzer/AFL over `load_config` in isolation); judged
   sufficient for trusted local operator input.
+
+- 2026-11-18, round 9 (TLS renegotiation/fragmentation, no finding,
+  `tree:round-9`). Closed round 6's last gap. OpenSSL is the trusted record
+  layer; the target was miniircd's own non-blocking SSL I/O. Drove the TLS port
+  with `HARDEN/harness/tls_reneg.c` (4 workers, 1000 connections per run, five
+  modes: TLS 1.2 client renegotiation, TLS 1.3 key update, fragmented records,
+  one-byte-per-record writes, renegotiation flood). ASan+UBSan: 0 reports, no
+  crash, no CPU peg, still serving. TSan: 0 warnings. A focused probe confirmed
+  the server refuses renegotiation (`SSL_OP_NO_RENEGOTIATION`): a client's TLS 1.2
+  `SSL_renegotiate` + `SSL_do_handshake` fails rather than completing a second
+  handshake, so reneg plaintext injection and reneg-flood CPU abuse are off the
+  table. No finding, no ledger row; the report is unchanged. `make check` and the
+  optimized build still pass.
+  Not checked this round: the record layer below the OpenSSL API (malformed,
+  overlapping, or compressed records, byte-level alert flooding) was not fuzzed;
+  OpenSSL stays the trusted record-layer boundary.
