@@ -117,3 +117,26 @@ H-010	WARN	FIXED	host-net	Half-open TLS handshakes were unbounded: a connection 
   `make check` and the optimized build still pass. H-010 is WARN, FIXED.
   Not checked this round: no renegotiation/fragmentation-specific fuzzing beyond
   the patterns above; `HANDSHAKE_TIMEOUT_MS` is fixed, not command-line tunable.
+
+- 2026-11-18, round 7 (configuration work, no finding, `tree:round-7`). Not a
+  finding-driven round: it records a feature change and the new parse surface it
+  adds. The example host gained a gitconfig-style config file (`-f`,
+  `example/miniircd.conf`), the TLS handshake deadline became tunable (`-H` and
+  `[tls] handshake-timeout`, resolving round 6's "not tunable" note), and the
+  library gained `uircd_config_set(cfg, key, value)`, a string-keyed setter that
+  parses and validates each value (the example dogfoods it for its `[limits]`
+  section). New input surface reviewed: the config file is a local,
+  operator-supplied file (not a network/attacker input), but its parsers were
+  still checked for memory safety. `uircd_config_set` was unit-tested under
+  ASan+UBSan across every key type and all error paths (unknown key, non-numeric,
+  trailing garbage, empty, unsigned overflow, NULL arguments); it uses `strtoul`
+  with full validation and stores string values as pointers (no allocation), so
+  it adds no ownership or free obligation. The config loader was exercised with
+  malformed lines, missing brackets, and unknown and bad-valued keys: each is
+  reported with file and line and refuses startup, and a config-driven run under
+  ASan showed no leak at exit. `make check` and the optimized build still pass.
+  No ledger row added; the report is unchanged.
+  Not checked this round: no fuzzing of the config lexer with adversarial files
+  (very long lines, embedded NULs, deep repetition); it is treated as trusted
+  local operator input, parsed with bounded `read_file` (1 MiB cap) and
+  fixed-size section buffers.
