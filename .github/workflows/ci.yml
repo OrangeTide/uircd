@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.c'
+      - '**.h'
+      - 'Makefile'
+      - 'example/**'
+      - 'tools/**'
+      - 'third_party/**'
+      - 'vendor/**'
+      - 'HARDEN/harness/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sanitizers:
+    name: Build + ASan/UBSan harnesses
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: Build (optimized)
+        run: make
+      - name: Config check
+        run: ./miniircd -C -f example/miniircd.conf
+      - name: Run HARDEN harnesses (ASan + UBSan)
+        run: make check
+
+  tsan:
+    name: ThreadSanitizer load
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: Build (TSan)
+        run: make tsan
+      - name: Run TSan load driver
+        run: |
+          set -euo pipefail
+          cc -O2 -g -pthread -w HARDEN/harness/tsan_load.c -o /tmp/tsan_load
+          # halt_on_error=0 lets the server run through the whole load; any race
+          # is written to the log and the grep below turns it into a failure.
+          # setarch -R disables ASLR, which TSan needs on some kernels.
+          setarch -R env TSAN_OPTIONS="halt_on_error=0" \
+            ./miniircd -p 7903 -t 4 >tsan.log 2>&1 &
+          srv=$!
+          sleep 1
+          for r in 1 2 3 4; do /tmp/tsan_load 7903 300 50; done
+          kill "$srv" 2>/dev/null || true
+          wait "$srv" 2>/dev/null || true
+          echo "---- server log ----"
+          cat tsan.log || true
+          if grep -q "ThreadSanitizer" tsan.log; then
+            echo "FAIL: ThreadSanitizer reported a race"
+            exit 1
+          fi
+          echo "TSan: no races"
