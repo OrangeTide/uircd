@@ -27,6 +27,7 @@ H-011	WARN	FIXED	host-net	The EMFILE reserve-shed busy-looped under a hard proce
 H-012	WARN	FIXED	auth	The scrypt KDF ran under the single global lock: on_readable held g_lock across uircd_recv -> cmd_pass/cmd_oper -> cfg.auth, so the ~61ms scrypt ran while holding g_lock and one login stalled every worker. Reachable with no secret (a bare PASS matches a shared * entry). Fixed: cmd_pass/cmd_oper return UIRCD_AUTH_PENDING, the host runs the KDF in a bounded pool with no lock held, and the verdict is applied later via uircd_auth_complete	example/miniircd.c on_auth (enqueue, no KDF under lock), kdf_main (auth_compute off-lock); uircd.c cmd_pass, cmd_oper (PENDING), uircd_auth_complete	A registered observer PING RTT stays within normal bounds while a login flood is in flight; satisfied structurally (auth_compute holds no engine lock) and confirmed by a TSan run showing the KDF pool runs off g_lock with 0 races; dedicated RTT harness not run	HARDEN/auth.md#2	tree:round-12
 H-013	OPP	FIXED	auth	Asynchronous authentication: run the KDF off the global lock in a bounded pool and deliver the login verdict at a scheduled deadline with jitter, closing both the timing enumeration (H-003) and the global-lock stall (H-012) without a decoy-KDF DoS. Implemented: UIRCD_AUTH_PENDING + uircd_auth_complete in the engine (holding the client's input until the verdict), and a bounded KDF thread pool, deadline timer, and {worker,auth_id} lifetime token in the host	uircd.h (UIRCD_AUTH_PENDING, uircd_auth_complete); uircd.c cmd_pass, cmd_oper, uircd_auth_complete, feed_bytes/hold; example/miniircd.c on_auth, kdf_main, on_auth_deadline, auth_warmup; example/auth.c auth_lookup/auth_compute	HARDEN/harness/async_auth.c drives the real uircd.c through UIRCD_AUTH_PENDING/uircd_auth_complete and prints "survived": a deferred accept replays held NICK/USER to register, a deferred reject drops the client, hold-cap overflow drops it, a close mid-pending frees the hold buffer, and a deferred OPER grants on accept, all under ASan+UBSan (verified to FAIL on an engine whose uircd_auth_complete is a no-op). An unknown-name flood costs ~no server CPU (auth_compute skips scrypt on a miss); engine, host, and KDF pool also ran clean under TSan (0 races, 0 leaks) over concurrent logins including mid-auth closes	HARDEN/DESIGN-async-auth.md	tree:round-13
 H-014	NOTE	ACCEPTED	auth	The H-003 login-timing equalization frays under a sustained login flood that saturates the KDF pool. As offered known-bad logins (which run scrypt) exceed the pool's within-deadline capacity both paths degrade together, so the gap stays small over a wide range (measured <3ms up to 8 concurrent, ~24-29ms at 16-32 concurrent on the default 2-thread pool), but at extreme saturation near the fail-closed poll cap (~64 concurrent, every login ~1s) a ~97ms known-vs-unknown separation re-emerges. Accepted: it appears only in the login-flood/bounded-CPU regime H-012/H-013 already accept (the server is fail-closing logins by then) with the signal buried in ~1s latency, and provisioning kdf-threads to the concurrent-login rate removes it	example/miniircd.c on_auth_deadline (poll re-arm when the pool is backed up); example/miniircd.c kdf_main (pool throughput)	HARDEN/harness/auth_timing.c -c N: within the pool's deadline capacity the known-bad vs unknown median gap stays within threshold (measured <3ms to 8 concurrent, ~24-29ms to 32 on the 2-thread pool); it exceeds only under extreme saturation (~97ms at 64 concurrent) and returns to ~0ms when kdf-threads is raised to cover the concurrency (measured ~0ms at 16 concurrent with 8 threads)	HARDEN/auth.md#3	-
+H-015	NOTE	FIXED	supply-chain	The vendored scrypt had no verifiable provenance pin: third_party/scrypt/VENDORED.md recorded only a local checkout path (~/boris/src/scrypt) with no upstream URL, no pinned commit, and no content hash, so a reader or packager could not tell whether the in-tree crypto matched a known upstream or had drifted since vendoring, while libiox in the same tree pins an exact commit. Fixed: VENDORED.md now records the upstream project URL, a reproducible subset content-hash pin, and the recipe to recompute it, so drift from the baseline is detectable offline	third_party/scrypt/VENDORED.md (Origin/Integrity-pin); contrast third_party/libiox/VENDORED.md (pinned commit)	Recomputing the documented subset hash (recipe and value in VENDORED.md and HARDEN/supply-chain.md#1) over the vendored files reproduces 1fd4bcc0a4e5b9d3c9aa2d80ffd9bc70153217f58f4e70fe02d63275ff7e4f3e; any added, removed, or modified vendored file changes it (recipe run this round, matches). Residual: binding the subset to one exact upstream commit, as libiox does, needs the commit the maintainer vendored from and is noted in VENDORED.md as the re-verify step, not claimed closed	HARDEN/supply-chain.md#1	tree:round-17
 ```
 
 ## Round log
@@ -319,3 +320,26 @@ H-014	NOTE	ACCEPTED	auth	The H-003 login-timing equalization frays under a susta
   adds transport latency to both paths (widening overlap, not the gap), and the
   deepest saturation point (fail-closed rejections) was characterized by latency,
   not by counting rejected logins.
+
+- 2026-11-19, round 17 (supply-chain surface, one finding, `tree:round-17`).
+  First review of the supply-chain and build surface (`HARDEN/supply-chain.md`),
+  the last of the four default surfaces not yet audited. Observed that the build
+  fetches nothing (no `curl`/`wget`/`git clone` in the Makefile, only in-tree
+  sources), that no object or binary is committed (`*.o` and the binaries are in
+  `.gitignore`, `git ls-files` lists none), that `vendor/daemonize.c` is
+  first-party code (Jon Mayo, MIT-0), not a vendored dependency, and that
+  `third_party/libiox` pins its upstream commit. Found H-015 (NOTE): the vendored
+  scrypt note recorded only a local checkout path with no upstream URL, no pinned
+  commit, and no content hash, so drift of the in-tree crypto from a known
+  baseline was undetectable, unlike libiox. Fixed this round by recording in
+  `third_party/scrypt/VENDORED.md` the upstream project URL, a reproducible
+  subset content-hash pin (SHA-256 1fd4bcc0..ff7e4f3e over the 7 vendored files,
+  this note excluded), and the offline recipe to recompute it; the recipe was run
+  and matches. H-015 moves to FIXED for the drift-detection property. No code,
+  harness, or build change; `make check` and the optimized build are unaffected.
+  Not checked this round: the vendored sources were not re-audited or diffed
+  line-by-line against upstream (provenance and drift, not a crypto review); the
+  content pin detects drift from the recorded baseline but does not by itself
+  prove the baseline equals a trusted upstream release, which still needs the
+  maintainer to record the exact upstream commit; the host toolchain (compiler,
+  libc, OpenSSL) provenance is the operator's, noted not enforced.
