@@ -32,11 +32,19 @@ call behind one lock. `example/miniircd.c` shows exactly that.
 ```sh
 make                # optimized build: ./miniircd and ./uircdpasswd
 make SANITIZE=1     # AddressSanitizer + UndefinedBehaviorSanitizer build
+make check          # build and run the HARDEN falsifiers under sanitizers
+make install        # install binaries, man pages, and a sample config
 make clean
 ```
 
 Requirements: a C11 compiler, pthreads, and OpenSSL (`libssl`/`libcrypto`) for
 the example's TLS. The core (`uircd.c`) itself needs none of these.
+
+`make install` installs `miniircd` to `$(PREFIX)/sbin`, `uircdpasswd` to
+`$(PREFIX)/bin`, the man pages (`miniircd.8`, `uircdpasswd.1`), and a sample
+config under `$(PREFIX)/share/doc/uircd`. `PREFIX` defaults to `/usr/local`;
+override it, the individual directories, or `DESTDIR` for a staged packaging
+install. `make uninstall` removes them.
 
 Vendored under `third_party/`: libiox (the event loop) and a minimal subset of
 Colin Percival's scrypt (password hashing for the example). Each has a

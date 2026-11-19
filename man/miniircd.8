@@ -1,0 +1,192 @@
+.TH MINIIRCD 8 "2026-11-19" "uircd 1.0" "System Manager's Manual"
+.SH NAME
+miniircd \- minimal threaded IRC server
+.SH SYNOPSIS
+.B miniircd
+.RI [ options ]
+.SH DESCRIPTION
+.B miniircd
+is a small, self-contained IRC server built on the
+.B uircd
+engine. It serves ordinary IRC clients: registration
+.RB ( NICK / USER ),
+channels
+.RB ( JOIN / PART / TOPIC / MODE / KICK ),
+messaging
+.RB ( PRIVMSG / NOTICE ),
+queries
+.RB ( WHO / NAMES / LIST ),
+and operator commands
+.RB ( OPER / KILL / KLINE / UNKLINE / GKILL / BANLIST ).
+It runs one worker thread per core behind
+.BR SO_REUSEPORT
+listeners and supports optional TLS.
+.PP
+Settings come from a configuration file
+.RB ( \-f )
+and from command-line options, which override the file. With no options it
+listens on port 6667 on all interfaces with no authentication required.
+.SH OPTIONS
+.TP
+.BI \-f " FILE"
+Read a gitconfig-style configuration file. See
+.B CONFIGURATION
+below and the bundled
+.IR miniircd.conf .
+.TP
+.BI \-p " PORT"
+Listen port (default 6667).
+.TP
+.B \-6
+Bind IPv6 (dual-stack).
+.TP
+.BI \-t " N"
+Worker threads (default: number of online CPUs).
+.TP
+.BI \-c " FILE"
+TLS certificate chain in PEM form. Supplying it enables TLS; a key
+.RB ( \-k )
+is then also required.
+.TP
+.BI \-k " FILE"
+TLS private key in PEM form.
+.TP
+.BI \-A " FILE"
+Password file for
+.B PASS
+and
+.B OPER
+authentication. Generate entries with
+.BR uircdpasswd (1).
+.TP
+.B \-L
+Require a successful login before a client may register.
+.TP
+.BI \-n " NAME"
+Server name used in messages (default irc.local).
+.TP
+.BI \-N " NET"
+Network name advertised in RPL_ISUPPORT (default uircd).
+.TP
+.BI \-m " FILE"
+Message-of-the-day file.
+.TP
+.BI \-P " N"
+Maximum concurrent connections from one source IP (default 8).
+.TP
+.BI \-R " SEC"
+Drop a connection that has not registered within
+.I SEC
+seconds (default 30).
+.TP
+.BI \-H " SEC"
+TLS handshake deadline in seconds (default 10).
+.TP
+.BI \-b " MS"
+Accept backoff on file-descriptor exhaustion, in milliseconds (default 100).
+.TP
+.B \-C
+Parse and validate the configuration, then exit without binding. Useful as a
+configuration test.
+.TP
+.B \-d
+Daemonize (run in the background).
+.TP
+.B \-h
+Print a usage summary and exit.
+.SH CONFIGURATION
+With
+.B \-f
+the server reads a gitconfig-style file: bracketed
+.RI [ section ]
+headers,
+.RI key " = " value
+lines, and
+.RB ' # '
+or
+.RB ' ; '
+comments. The sections and keys are:
+.RS
+.TP
+.B [server]
+name, network, motd
+.TP
+.B [listen]
+port, ipv6
+.TP
+.B [tls]
+cert, key, handshake-timeout
+.TP
+.B [auth]
+passwd, require-login, auth-deadline-ms, auth-jitter-ms, kdf-threads
+.TP
+.B [privacy]
+host-cloak
+.TP
+.B [limits]
+threads, accept-backoff-ms, max-per-ip, reg-timeout, max-clients,
+max-channels, ping-interval, ping-timeout, flood-lines, flood-window
+.RE
+.PP
+Times in
+.B [limits]
+are in seconds; the
+.B [auth]
+deadline and jitter are in milliseconds. An omitted key keeps the built-in
+default. Command-line options override the file.
+.SH AUTHENTICATION
+When a password file is configured, clients log in with
+.RB ' "PASS account:password" '
+(or a bare
+.RB ' "PASS password" '
+against a shared
+.RB ' * '
+entry), and operators use
+.RB ' "OPER name password" '.
+Logins are verified off the engine lock by a small thread pool
+.RB ( "[auth] kdf-threads" )
+and answered at a fixed deadline whether or not a hash was checked, so response
+timing does not reveal which account names exist. The deadline
+.RB ( "[auth] auth-deadline-ms" )
+must exceed the slowest configured scrypt.
+.SH PRIVACY
+By default each client's IP address is hidden from other users: the host shown
+in
+.B WHO
+and in message prefixes is a per-run keyed hash of the real address
+.RI ( <hex> .cloak).
+An operator still sees real addresses in
+.BR WHO ,
+and bans and the log always use the real address. Set
+.RB ' "[privacy] host-cloak = false" '
+to show raw addresses instead. The server makes no outbound connections and
+sends nothing off the machine.
+.SH SIGNALS
+.TP
+.B SIGINT ", " SIGTERM
+Shut the server down cleanly.
+.SH EXIT STATUS
+Returns 0 on a clean shutdown, and nonzero on a configuration error or a
+startup failure (for example a port that cannot be bound).
+.SH EXAMPLES
+Run four workers requiring login against a password file:
+.PP
+.RS
+.nf
+miniircd \-p 6667 \-t 4 \-A users.passwd \-L
+.fi
+.RE
+.PP
+Validate a configuration file without starting:
+.PP
+.RS
+.nf
+miniircd \-C \-f /etc/miniircd/miniircd.conf
+.fi
+.RE
+.SH SEE ALSO
+.BR uircdpasswd (1)
+.SH BUGS
+Report security issues through the project's
+.I SECURITY.md
+process.

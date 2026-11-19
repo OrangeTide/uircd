@@ -1,0 +1,89 @@
+.TH UIRCDPASSWD 1 "2026-11-19" "uircd 1.0" "User Commands"
+.SH NAME
+uircdpasswd \- generate a password entry for miniircd
+.SH SYNOPSIS
+.B uircdpasswd
+.I name flags
+.RI [ password ]
+.SH DESCRIPTION
+.B uircdpasswd
+produces one line for the
+.BR miniircd (8)
+password file, hashing a password with scrypt. It writes the line to standard
+output; redirect or append it to the file named by the server's
+.B \-A
+option (or the
+.RB ' "[auth] passwd" '
+setting).
+.PP
+If
+.I password
+is omitted it is read from the terminal with echo disabled. The program wipes
+the plaintext password and the derived hash from memory before it exits.
+.SH ARGUMENTS
+.TP
+.I name
+The account name, or
+.RB ' * '
+for a shared entry that any
+.RB ' "PASS password" '
+matches.
+.TP
+.I flags
+One or more of:
+.RB ' c '
+(may connect) and
+.RB ' o '
+(may use
+.BR OPER ).
+.TP
+.I password
+The password. Read from the terminal if not given on the command line. Passing
+it as an argument may expose it in the process list and shell history; prefer
+the prompt.
+.SH OUTPUT
+The emitted line has the form:
+.PP
+.RS
+.nf
+name:scrypt:N:r:p:salt_b64:hash_b64:flags
+.fi
+.RE
+.PP
+where
+.IR N ", " r ", and " p
+are the scrypt work parameters, and the salt and hash are Base64. The salt is
+drawn from the operating system random source.
+.SH EXIT STATUS
+Returns 0 on success, and nonzero on a usage error or if the password could not
+be read or hashed.
+.SH EXAMPLES
+Create a login account, entering the password at the prompt:
+.PP
+.RS
+.nf
+uircdpasswd alice c >> users.passwd
+.fi
+.RE
+.PP
+Create an operator who may also connect:
+.PP
+.RS
+.nf
+uircdpasswd admin co >> users.passwd
+.fi
+.RE
+.PP
+Create a shared connect password:
+.PP
+.RS
+.nf
+uircdpasswd '*' c >> users.passwd
+.fi
+.RE
+.SH SECURITY
+Keep the password file readable only by the account that runs the server; it
+holds scrypt hashes. See
+.IR SECURITY.md .
+.SH SEE ALSO
+.BR miniircd (8)

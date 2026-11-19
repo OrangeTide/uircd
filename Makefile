@@ -3,12 +3,23 @@
 #   make              build everything (optimized)
 #   make SANITIZE=1   build with AddressSanitizer + UndefinedBehaviorSanitizer
 #   make sanitize     same as SANITIZE=1
+#   make check        build and run the HARDEN falsifiers under sanitizers
+#   make install      install binaries, man pages, and a sample config
 #   make clean
 
 CC      ?= cc
 IOX_DIR    = third_party/libiox
 SCRYPT_DIR = third_party/scrypt
 EX         = example
+
+# Install layout. Override PREFIX (or the individual dirs), and DESTDIR for a
+# staged/packaging install, e.g. make DESTDIR=/tmp/pkg PREFIX=/usr install.
+PREFIX  ?= /usr/local
+BINDIR  ?= $(PREFIX)/bin
+SBINDIR ?= $(PREFIX)/sbin
+MANDIR  ?= $(PREFIX)/share/man
+DOCDIR  ?= $(PREFIX)/share/doc/uircd
+INSTALL ?= install
 
 INCS = -I. -I$(IOX_DIR) -I$(SCRYPT_DIR) -I$(EX) -Ivendor
 
@@ -95,4 +106,24 @@ clean:
 	    $(EX_OBJS) $(TOOL_OBJS) \
 	    $(addprefix $(HARNESS_DIR)/,$(HARNESSES))
 
-.PHONY: all sanitize tsan check clean
+# Install the daemon to sbin, the passwd tool to bin, the man pages, and a
+# sample config. DESTDIR stages the tree for packaging.
+install: all
+	$(INSTALL) -d $(DESTDIR)$(SBINDIR) $(DESTDIR)$(BINDIR)
+	$(INSTALL) -m 755 miniircd $(DESTDIR)$(SBINDIR)/miniircd
+	$(INSTALL) -m 755 uircdpasswd $(DESTDIR)$(BINDIR)/uircdpasswd
+	$(INSTALL) -d $(DESTDIR)$(MANDIR)/man8 $(DESTDIR)$(MANDIR)/man1
+	$(INSTALL) -m 644 man/miniircd.8 $(DESTDIR)$(MANDIR)/man8/miniircd.8
+	$(INSTALL) -m 644 man/uircdpasswd.1 $(DESTDIR)$(MANDIR)/man1/uircdpasswd.1
+	$(INSTALL) -d $(DESTDIR)$(DOCDIR)
+	$(INSTALL) -m 644 example/miniircd.conf $(DESTDIR)$(DOCDIR)/miniircd.conf
+
+uninstall:
+	rm -f $(DESTDIR)$(SBINDIR)/miniircd
+	rm -f $(DESTDIR)$(BINDIR)/uircdpasswd
+	rm -f $(DESTDIR)$(MANDIR)/man8/miniircd.8
+	rm -f $(DESTDIR)$(MANDIR)/man1/uircdpasswd.1
+	rm -f $(DESTDIR)$(DOCDIR)/miniircd.conf
+	-rmdir $(DESTDIR)$(DOCDIR)
+
+.PHONY: all sanitize tsan check clean install uninstall
