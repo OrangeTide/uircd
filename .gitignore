@@ -1,0 +1,4 @@
+*.o
+/miniircd
+/uircdpasswd
+HARDEN/harness/kline_self_uaf
