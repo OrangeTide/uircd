@@ -46,7 +46,8 @@ TOOL_OBJS   = tools/uircdpasswd.o $(EX)/b64.o
 BINS = miniircd uircdpasswd
 
 HARNESS_DIR = HARDEN/harness
-HARNESSES   = kline_self_uaf conn_cap ban_negation async_auth dispatch_fuzz
+HARNESSES   = kline_self_uaf conn_cap ban_negation async_auth dispatch_fuzz \
+              host_cloak
 HARNESS_SAN = -fsanitize=address,undefined -fno-omit-frame-pointer \
               -fno-sanitize-recover=undefined
 

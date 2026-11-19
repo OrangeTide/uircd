@@ -81,9 +81,9 @@ Command-line options override the file. `./miniircd -C -f miniircd.conf` parses
 and checks a configuration then exits, without binding a port. `example/miniircd.conf`
 is a documented sample; the sections are `[server]` (name, network, motd), `[listen]` (port,
 ipv6), `[tls]` (cert, key, handshake-timeout), `[auth]` (passwd, require-login,
-auth-deadline-ms, auth-jitter-ms, kdf-threads), and `[limits]` (threads,
-accept-backoff-ms, max-per-ip, reg-timeout, max-clients, max-channels,
-ping-interval, ping-timeout, flood-lines, flood-window). Times in `[limits]` are
+auth-deadline-ms, auth-jitter-ms, kdf-threads), `[privacy]` (host-cloak), and
+`[limits]` (threads, accept-backoff-ms, max-per-ip, reg-timeout, max-clients,
+max-channels, ping-interval, ping-timeout, flood-lines, flood-window). Times in `[limits]` are
 in seconds; the `[auth]` deadline and jitter are in milliseconds, as their names
 say. An omitted key keeps the built-in default. `-h` lists every command-line
 option.
@@ -183,11 +183,13 @@ machine: no telemetry, no crash reports, no update or license checks. The only
 data that leaves a process is IRC traffic to connected clients and whatever the
 operator's `log` callback writes locally.
 
-A connecting user's IP address is recorded locally (the example logs a
-`connect` event with the peer address) and, like any IRC server, is visible to
-other users: the stored host is the raw peer IP, with no host cloaking, so it
-appears in `WHO`/`WHOIS` replies and in the `nick!user@host` prefix of a user's
-messages. Treat the operator log as holding client IP addresses, and tell your
-users their address is visible server-wide. A deployment that needs host
-masking must add it; this minimal example does not cloak. See finding H-016 in
-[`HARDEN.md`](HARDEN.md).
+A connecting user's IP address is recorded in the operator log (the example logs
+a `connect` event with the peer address). To other users it is cloaked by
+default: the host shown in `WHO` and in the `nick!user@host` message prefix is a
+keyed hash of the real address, `<hex>.cloak`, from which the real address
+cannot be recovered. An operator still sees real addresses in `WHO`, and bans
+(`KLINE`) always match the real address, so cloaking is display-only. The key is
+random per server run, so a user's cloak is stable within a run and changes on
+restart. Set `[privacy] host-cloak = false` to show raw IPs instead, the older
+behavior. The operator log always records real addresses; treat it accordingly.
+See finding H-016 in [`HARDEN.md`](HARDEN.md).

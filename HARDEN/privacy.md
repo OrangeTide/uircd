@@ -73,3 +73,49 @@ not parsing.
 - DNS: the server does no reverse lookup, so it discloses the IP, not a resolved
   hostname. A deployment that adds reverse DNS would change what is disclosed and
   should be re-reviewed.
+
+## Round 2 (2026-11-19)
+
+Implemented host cloaking, moving H-016 from accepted-with-disclosure to fixed.
+The design choices (operator visibility, key stability, cloak format) were
+decided with the maintainer before coding.
+
+### Changed
+
+- The engine computes a per-client cloak at accept time: a keyed hash of the
+  real host rendered as `<hex>.cloak` (`compute_cloak`). A new `vis_host` helper
+  returns the cloak when `cfg.host_cloak` is set, else the real host, and
+  `cli_prefix` uses it, so every `nick!user@host` prefix shown to others carries
+  the cloak. `cmd_who` shows the real host to an operator-requester and the cloak
+  to everyone else.
+- The real host is unchanged everywhere it matters for enforcement: ban matching
+  (`F_HOST`/`F_IP`), the per-IP cap, and the operator log all use `c->host`. So
+  cloaking is display-only; operators still ban and log real addresses.
+- The cloak key is secret and per server run: `example/miniircd.c` fills
+  `cfg.cloak_key` from `getrandom`, so cloaks are stable within a run, change on
+  restart, and cannot be reversed to the real address by an observer. Cloaking is
+  on by default; `[privacy] host-cloak = false` restores raw IPs.
+- The library stays mechanism-only: `uircd.h` gains `host_cloak` and `cloak_key`
+  config fields; the policy default (on) lives in the example host.
+
+### Judged
+
+#### 2. Host cloaking hides client IPs from other users  [H-016, fixed]
+
+- **Falsifier:** `HARDEN/harness/host_cloak.c`, built and run under ASan+UBSan.
+  With cloaking on it asserts a non-operator's `WHO` reply and JOIN-prefix echo
+  contain `<hex>.cloak` and never the raw IP; an operator's `WHO` contains the
+  raw IP; and with cloaking off the raw IP is shown and no cloak appears. Prints
+  `survived`. It discriminates: built against a `uircd.c` whose `vis_host`
+  returns the real host, it aborts with `raw IP in JOIN prefix under cloaking`.
+
+### Not checked this round
+
+- The cloak hash is a keyed non-cryptographic mix (FNV-style). It is adequate for
+  hiding the address from other users given a secret per-run key, but it is not a
+  cryptographic MAC; a deployment with a stronger threat model (a persistent,
+  shared cloak used as an identifier) would want a keyed cryptographic hash and a
+  managed key, which this does not provide.
+- Operators see real hosts through `WHO` by design; message prefixes show the
+  cloak to everyone, including operators, so an operator reads a real address via
+  `WHO`, not from a prefix.

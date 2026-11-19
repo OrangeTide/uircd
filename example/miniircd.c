@@ -34,6 +34,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 
@@ -1024,6 +1025,7 @@ struct hostconf {
     unsigned auth_deadline_ms;      /* deferred-login response deadline */
     unsigned auth_jitter_ms;        /* random spread added to the deadline */
     int kdf_threads;                /* scrypt worker threads */
+    int host_cloak;                 /* hide client IPs from other users */
 
     /* Engine limits are accumulated here through the library's own string
      * setter (see the [limits] handlers), rather than poking struct fields. */
@@ -1037,6 +1039,7 @@ hostconf_defaults(struct hostconf *hc)
     hc->port = 6667;
     hc->srvname = strdup("irc.local");
     hc->network = strdup("uircd");
+    hc->host_cloak = 1; /* cloak client IPs by default */
 }
 
 static void
@@ -1116,6 +1119,8 @@ hostconf_set(struct hostconf *hc, const char *sec, const char *name,
     if (MATCH("auth", "auth-jitter-ms"))
         { hc->auth_jitter_ms = (unsigned)atoi(val); return 0; }
     if (MATCH("auth", "kdf-threads")) { hc->kdf_threads = atoi(val); return 0; }
+    if (MATCH("privacy", "host-cloak"))
+        { hc->host_cloak = parse_bool(val); return 0; }
     if (MATCH("limits", "threads")) { hc->nthreads = atoi(val); return 0; }
     if (MATCH("limits", "accept-backoff-ms"))
         { hc->accept_backoff_ms = (unsigned)atoi(val); return 0; }
@@ -1375,6 +1380,11 @@ main(int argc, char **argv)
     cfg.motd = motd;
     cfg.version = "uircd-1.0";
     cfg.require_login = hc.require_login;
+    cfg.host_cloak = hc.host_cloak;
+    /* A per-run secret so cloaks cannot be reversed to the real address. */
+    if (getrandom(&cfg.cloak_key, sizeof(cfg.cloak_key), 0) !=
+        (ssize_t)sizeof(cfg.cloak_key))
+        cfg.cloak_key = ((uint64_t)now_ms() << 20) ^ (uint64_t)getpid();
     cfg.out = on_out;
     cfg.drop = on_drop;
     cfg.auth = hc.passwd ? on_auth : NULL;

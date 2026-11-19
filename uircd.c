@@ -110,6 +110,7 @@ struct uircd_client {
     char user[USER_MAX + 1];
     char real[REAL_MAX + 1];
     char host[HOST_MAX + 1]; /* printable peer ip, used as host */
+    char cloak[HOST_MAX + 1]; /* display host shown to others when cloaking */
     char acct[ACCT_MAX + 1]; /* account name if logged in, else empty */
     unsigned umodes;
 
@@ -348,13 +349,44 @@ secure_wipe(void *p, size_t n)
         *v++ = 0;
 }
 
+/* Keyed hash of a real host into a display cloak "<hex>.cloak". The secret key
+ * (per server run) keeps the mapping non-reversible, so an observer cannot
+ * recover the real address from the cloak. */
+static void
+compute_cloak(struct uircd *s, const char *host, char *out, size_t outsz)
+{
+    uint64_t h = 1469598103934665603ULL ^ s->cfg.cloak_key;
+    const unsigned char *p = (const unsigned char *)host;
+
+    while (*p) {
+        h ^= *p++;
+        h *= 1099511628211ULL;
+    }
+    h ^= s->cfg.cloak_key;
+    h *= 1099511628211ULL;
+    snprintf(out, outsz, "%08x%08x.cloak",
+             (unsigned)(h >> 32), (unsigned)(h & 0xffffffffu));
+}
+
+/* The host to show to other users: the cloak when cloaking is on, else the
+ * real host. Operators are shown the real host through cmd_who directly. */
+static const char *
+vis_host(struct uircd_client *c)
+{
+    if (c->srv->cfg.host_cloak && c->cloak[0])
+        return c->cloak;
+    return c->host;
+}
+
 static void
 cli_prefix(struct uircd_client *c, char *buf, size_t sz)
 {
+    const char *host = vis_host(c);
+
     snprintf(buf, sz, "%s!%s@%s",
              c->nick[0] ? c->nick : "*",
              c->user[0] ? c->user : "*",
-             c->host[0] ? c->host : "*");
+             host[0] ? host : "*");
 }
 
 static void
@@ -1278,8 +1310,9 @@ cmd_who(struct uircd *s, struct uircd_client *c, struct msg *m)
             struct uircd_client *t = ch->members[i].c;
             const char *fl = (ch->members[i].flags & MEMB_OP) ? "H@" :
                              (ch->members[i].flags & MEMB_VOICE) ? "H+" : "H";
+            const char *wh = (c->umodes & UMODE_OPER) ? t->host : vis_host(t);
             numeric(s, c, 352, "%s %s %s %s %s %s :0 %s",
-                    ch->name, t->user, t->host, srv_name(s), t->nick, fl,
+                    ch->name, t->user, wh, srv_name(s), t->nick, fl,
                     t->real);
         }
     } else {
@@ -1290,7 +1323,8 @@ cmd_who(struct uircd *s, struct uircd_client *c, struct msg *m)
             if (!glob_match(mask, t->nick, 1) && strcmp(mask, "*") != 0)
                 continue;
             numeric(s, c, 352, "* %s %s %s %s H :0 %s",
-                    t->user, t->host, srv_name(s), t->nick, t->real);
+                    t->user, (c->umodes & UMODE_OPER) ? t->host : vis_host(t),
+                    srv_name(s), t->nick, t->real);
         }
     }
     numeric(s, c, 315, "%s :End of /WHO list", mask);
@@ -1922,6 +1956,8 @@ uircd_accept(struct uircd *s, void *host_conn, const char *peer_ip)
     c->host_conn = host_conn;
     c->srv = s;
     copy_str(c->host, sizeof(c->host), peer_ip ? peer_ip : "unknown");
+    if (s->cfg.host_cloak)
+        compute_cloak(s, c->host, c->cloak, sizeof(c->cloak));
     s->clients[s->n_clients++] = c;
 
     if (client_banned(s, c, &why)) {

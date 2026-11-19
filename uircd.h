@@ -108,6 +108,17 @@ struct uircd_config {
                                 * registered within this window is dropped,
                                 * rather than waiting for the ping cycle. */
 
+    int host_cloak;            /* nonzero: hide each client's real host from
+                                * other users. The cloak (a keyed hash of the
+                                * real host, "<hex>.cloak") replaces the host in
+                                * WHO and in the nick!user@host prefix shown to
+                                * others; an operator still sees real hosts in
+                                * WHO. Bans and the log always use the real host,
+                                * so cloaking is display-only. */
+    uint64_t cloak_key;        /* secret key for the cloak hash; set it from a
+                                * random source so cloaks are not reversible.
+                                * Only used when host_cloak is nonzero. */
+
     uircd_out_cb out;          /* required */
     uircd_drop_cb drop;        /* required */
     uircd_auth_cb auth;        /* may be NULL */
