@@ -187,5 +187,6 @@ H-011	WARN	FIXED	host-net	The EMFILE reserve-shed busy-looped under a hard proce
   availability; CPU drops to ~2 ticks and accepting resumes once descriptors
   free. Checked clean under ASan and TSan at the hard limit; the single-worker
   H-009 case stays at ~1 tick. `make check` and the optimized build still pass.
-  H-011 is WARN, FIXED.
-  Not checked this round: the 100 ms accept backoff is fixed, not configurable.
+  H-011 is WARN, FIXED. (The 100 ms accept backoff was made configurable
+  afterward via `-b` and `[limits] accept-backoff-ms`; not a security change, so
+  no new ledger row.)

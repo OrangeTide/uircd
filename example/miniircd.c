@@ -43,11 +43,12 @@
 #define MAX_OUTBUF   (1u << 20)   /* 1 MiB per-connection output cap */
 #define READ_CHUNK   8192
 #define TICK_MS      1000
-#define ACCEPT_BACKOFF_MS 100 /* pause accepting this long on fd exhaustion */
+#define DEF_ACCEPT_BACKOFF_MS 100  /* pause accepting this long on fd exhaustion */
 #define DEF_HANDSHAKE_TIMEOUT_MS 10000 /* reclaim a stalled TLS handshake */
 
-/* Host-side TLS handshake deadline, configurable (see load_config). */
+/* Host-side timers, configurable (see load_config). */
 static unsigned g_handshake_timeout_ms = DEF_HANDSHAKE_TIMEOUT_MS;
+static unsigned g_accept_backoff_ms = DEF_ACCEPT_BACKOFF_MS;
 
 struct worker;
 
@@ -487,7 +488,7 @@ on_accept(struct iox_loop *loop, int fd, unsigned events, void *arg)
                  * the listener and re-arm it after a short backoff, so CPU is
                  * bounded no matter how long the table stays full. */
                 iox_fd_mod(w->loop, fd, 0);
-                iox_timer_add(w->loop, ACCEPT_BACKOFF_MS, on_relisten, w);
+                iox_timer_add(w->loop, g_accept_backoff_ms, on_relisten, w);
                 break;
             }
             break; /* EAGAIN or another transient error: done for now */
@@ -756,6 +757,7 @@ struct hostconf {
     int port, use6, nthreads, daemon, require_login;
     char *cert, *key, *passwd, *srvname, *network, *motd_path;
     unsigned handshake_timeout_s;   /* host-side TLS handshake deadline */
+    unsigned accept_backoff_ms;     /* host-side accept pause on fd exhaustion */
 
     /* Engine limits are accumulated here through the library's own string
      * setter (see the [limits] handlers), rather than poking struct fields. */
@@ -844,6 +846,8 @@ hostconf_set(struct hostconf *hc, const char *sec, const char *name,
     if (MATCH("auth", "require-login"))
         { hc->require_login = parse_bool(val); return 0; }
     if (MATCH("limits", "threads")) { hc->nthreads = atoi(val); return 0; }
+    if (MATCH("limits", "accept-backoff-ms"))
+        { hc->accept_backoff_ms = (unsigned)atoi(val); return 0; }
     if (MATCH("limits", "max-per-ip"))   return engine_count(hc, "max-per-ip", val);
     if (MATCH("limits", "max-clients"))  return engine_count(hc, "max-clients", val);
     if (MATCH("limits", "max-channels")) return engine_count(hc, "max-channels", val);
@@ -941,6 +945,7 @@ usage(const char *prog)
         "  -R SEC       drop unregistered sessions after SEC seconds"
         " (default 30)\n"
         "  -H SEC       TLS handshake deadline in seconds (default 10)\n"
+        "  -b MS        accept backoff on fd exhaustion, ms (default 100)\n"
         "  -C           parse and check the configuration, then exit\n"
         "  -d           daemonize (background)\n"
         "  -h           this help\n"
@@ -966,6 +971,7 @@ apply_opt(struct hostconf *hc, int opt, const char *arg)
     case 'P': if (engine_count(hc, "max-per-ip", arg)) return -1; break;
     case 'R': if (engine_secs(hc, "reg-timeout-ms", arg)) return -1; break;
     case 'H': hc->handshake_timeout_s = (unsigned)atoi(arg); break;
+    case 'b': hc->accept_backoff_ms = (unsigned)atoi(arg); break;
     case 'd': hc->daemon = 1; break;
     default: return -1;
     }
@@ -975,7 +981,7 @@ apply_opt(struct hostconf *hc, int opt, const char *arg)
 int
 main(int argc, char **argv)
 {
-    static const char *optstr = "f:p:6t:c:k:A:Ln:N:m:P:R:H:Cdh";
+    static const char *optstr = "f:p:6t:c:k:A:Ln:N:m:P:R:H:b:Cdh";
     struct uircd_config cfg;
     struct hostconf hc;
     const char *cfgpath = NULL;
@@ -1042,6 +1048,8 @@ main(int argc, char **argv)
         hc.nthreads = 256;
     if (hc.handshake_timeout_s > 0)
         g_handshake_timeout_ms = hc.handshake_timeout_s * 1000u;
+    if (hc.accept_backoff_ms > 0)
+        g_accept_backoff_ms = hc.accept_backoff_ms;
 
     if (check_only) {
         /* configuration parsed and validated; do not bind or start threads */

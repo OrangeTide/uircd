@@ -388,5 +388,7 @@ busy-loop.
 
 ### Not checked this round
 
-- The backoff is a fixed 100 ms, not tuned or configurable; adequate to bound
-  CPU while keeping accept latency low when descriptors free.
+- The backoff default is 100 ms, which bounds CPU while keeping accept latency
+  low when descriptors free. (Made configurable afterward via `-b` and the
+  `[limits] accept-backoff-ms` config key; not a security change, so no new
+  ledger row.)
