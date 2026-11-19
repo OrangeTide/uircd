@@ -56,3 +56,20 @@ cc -fsanitize=address,undefined -fno-omit-frame-pointer -g -std=c11 \
 
 Expected on the fixed tree: `survived`, exit 0. On the pre-fix tree the
 assertions abort because the wrong client was removed.
+
+## tsan_load  (H-007, H-008)
+
+A load driver, not a self-contained harness: it needs a running server. Build
+the host under ThreadSanitizer and drive it with concurrent clients to surface
+the worker-interaction races.
+
+```sh
+make tsan
+setarch -R env TSAN_OPTIONS=halt_on_error=0 ./miniircd -p 7903 -t 4 &
+cc -O2 -g -pthread -w HARDEN/harness/tsan_load.c -o /tmp/tsan_load
+for r in 1 2 3 4; do /tmp/tsan_load 7903 300 50; done
+```
+
+Expected on the fixed tree: ThreadSanitizer reports nothing. Before the fixes it
+reports a `heap-use-after-free` (H-007) and a data race on `g_stop` (H-008).
+`setarch -R` disables ASLR, which TSan requires on some kernels.

@@ -102,3 +102,59 @@ the engine never sees.
 - The per-IP match is an exact string compare on the printable `peer_ip`. A host
   reached through both IPv4 and IPv6, or behind a shared NAT, is counted per
   textual address, which is the intended granularity but not a per-subnet cap.
+
+## Round 3 (2026-11-18) -- ThreadSanitizer run
+
+Round 1 left the thread-safety claim reasoned from the single-lock discipline
+and one live ASan run, not proven. This round built the host under
+ThreadSanitizer (`make tsan`) and drove it with `HARDEN/harness/tsan_load.c`:
+hundreds of concurrent connections across 4 to 8 workers joining one busy
+channel. Two races surfaced; both are fixed, and a rerun is clean (0 warnings
+over 1600+ connections).
+
+### 1. Use-after-free in on_io when a fd is both writable and readable  [H-007]
+
+- **Claim:** `on_io` is the single per-fd watcher. It called `on_writable` then
+  `on_readable` for the event mask. When a fd carried both `IOX_WRITE` and
+  `IOX_READ` in one poll pass and `on_writable` closed the connection (a write
+  error, or `want_close` with the buffer now drained), `close_conn` freed the
+  `conn`; `on_io` then passed the freed pointer to `on_readable`. TSan caught the
+  read in `on_readable` (miniircd.c:301) against the `free` in `close_conn`
+  reached from `on_writable`, both on the same worker thread in one
+  `iox_loop_poll` pass. Reachable by any client; an abrupt close while the server
+  is still flushing fan-out output is the natural trigger.
+- **Lines:** example/miniircd.c `on_io`; `on_writable` (its `close_conn` paths);
+  `close_conn`.
+- **Falsifier:** `HARDEN/harness/tsan_load.c` driving a `make tsan` server with
+  more than one worker. Before the fix TSan reports `heap-use-after-free` with
+  `on_readable` reading what `on_writable` -> `close_conn` freed; after, 0
+  warnings. Run and reproduced this round.
+- **Fix shape:** the worker records the conn `on_io` is dispatching (`io_cur`),
+  and `close_conn` sets `io_cur_freed` when it frees that conn. `on_io` skips the
+  read half when the flag is set. This covers every close path inside
+  `on_writable`, including `drive_handshake`. **Fixed this round.**
+
+### 2. Data race on the shutdown flag g_stop  [H-008]
+
+- **Claim:** `g_stop` was `volatile sig_atomic_t`, written unlocked by the main
+  thread after `sigwait` and read by every worker (`on_wake`, `worker_main`).
+  `volatile sig_atomic_t` is async-signal safe but is not a thread
+  synchronization; TSan reports the main write against a worker read. Benign in
+  practice (a late read just delays a worker's exit by one loop pass) but a real
+  race.
+- **Lines:** example/miniircd.c `g_stop` declaration; write in `main`; reads in
+  `on_wake` and `worker_main`.
+- **Falsifier:** the same TSan run reports a data race on global `g_stop`; 0
+  after the fix.
+- **Fix shape:** declare `g_stop` as `atomic_int`. Direct reads and writes then
+  compile to atomic operations, with no other change. `g_stop` is never touched
+  from an async signal handler (signals are handled via `sigwait` in `main`), so
+  dropping `sig_atomic_t` is safe. **Fixed this round.**
+
+### Not checked this round
+
+- No TSan coverage of the TLS handshake path (the load run was plaintext); the
+  handshake close paths share the `on_io`/`close_conn` fix but were not exercised
+  under TSan.
+- TSan requires ASLR off on this kernel (`setarch -R`); the run is otherwise
+  unmodified.

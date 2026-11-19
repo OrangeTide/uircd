@@ -23,6 +23,7 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,6 +69,9 @@ struct worker {
     struct conn *conns;       /* doubly linked list owned by this worker */
     int id;
     int is_ticker;            /* worker 0 drives uircd_tick */
+
+    struct conn *io_cur;      /* conn on_io is currently dispatching, or NULL */
+    int io_cur_freed;         /* set if close_conn freed io_cur this dispatch */
 };
 
 static struct uircd *g_srv;
@@ -75,7 +79,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static SSL_CTX *g_tls;
 static struct worker *g_workers;
 static int g_nworkers;
-static volatile sig_atomic_t g_stop;
+static atomic_int g_stop; /* set by main after sigwait, read by all workers */
 static int g_daemon;
 
 static void on_readable(struct iox_loop *, int, unsigned, void *);
@@ -198,6 +202,9 @@ update_events(struct conn *c)
 static void
 close_conn(struct conn *c)
 {
+    /* If on_io is mid-dispatch on this conn, tell it not to touch c again. */
+    if (c->w->io_cur == c)
+        c->w->io_cur_freed = 1;
     iox_fd_remove(c->w->loop, c->fd);
     if (c->cli) {
         uircd_closed(g_srv, c->cli);
@@ -477,10 +484,22 @@ on_accept(struct iox_loop *loop, int fd, unsigned events, void *arg)
 static void
 on_io(struct iox_loop *loop, int fd, unsigned events, void *arg)
 {
+    struct conn *c = arg;
+    struct worker *w = c->w;
+
+    /* A single fd can be ready for both write and read in one poll pass.
+     * If handling the writable event closes the connection (write error or a
+     * drained want_close), c is freed and must not be touched for the read
+     * event. close_conn sets io_cur_freed when it frees the dispatched conn. */
+    w->io_cur = c;
+    w->io_cur_freed = 0;
+
     if (events & IOX_WRITE)
         on_writable(loop, fd, events, arg);
-    if (events & (IOX_READ | IOX_EXCEPT))
+    if (!w->io_cur_freed && (events & (IOX_READ | IOX_EXCEPT)))
         on_readable(loop, fd, events, arg);
+
+    w->io_cur = NULL;
 }
 
 static void

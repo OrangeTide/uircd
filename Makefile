@@ -25,6 +25,14 @@ CFLAGS  += $(SAN) -O1
 LDFLAGS += $(SAN)
 endif
 
+# ThreadSanitizer, for verifying the worker locking discipline. Mutually
+# exclusive with SANITIZE.
+ifdef TSAN
+SAN = -fsanitize=thread -fno-omit-frame-pointer
+CFLAGS  += $(SAN) -O1
+LDFLAGS += $(SAN)
+endif
+
 LIB_OBJS    = uircd.o
 IOX_OBJS    = $(IOX_DIR)/iox_loop.o $(IOX_DIR)/iox_fd.o \
               $(IOX_DIR)/iox_timer.o $(IOX_DIR)/iox_signal.o \
@@ -52,7 +60,7 @@ uircdpasswd: $(TOOL_OBJS) $(SCRYPT_OBJS)
 
 # Vendored scrypt is third-party: build it without our warning set.
 $(SCRYPT_DIR)/%.o: $(SCRYPT_DIR)/%.c
-	$(CC) -std=c11 -O2 -g -w -D_GNU_SOURCE $(if $(SANITIZE),$(SAN)) \
+	$(CC) -std=c11 -O2 -g -w -D_GNU_SOURCE $(SAN) \
 	    $(INCS) -c $< -o $@
 
 %.o: %.c
@@ -60,6 +68,9 @@ $(SCRYPT_DIR)/%.o: $(SCRYPT_DIR)/%.c
 
 sanitize:
 	$(MAKE) SANITIZE=1
+
+tsan:
+	$(MAKE) TSAN=1
 
 # Build and run every HARDEN falsifier under ASan+UBSan. Each must print
 # "survived"; any other output or a nonzero exit fails the check.
@@ -83,4 +94,4 @@ clean:
 	    $(EX_OBJS) $(TOOL_OBJS) \
 	    $(addprefix $(HARNESS_DIR)/,$(HARNESSES))
 
-.PHONY: all sanitize check clean
+.PHONY: all sanitize tsan check clean
