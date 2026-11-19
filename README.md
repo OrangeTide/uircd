@@ -175,3 +175,19 @@ This code carries a HARDEN review: see [`HARDEN.md`](HARDEN.md) for the finding
 ledger, [`HARDEN/`](HARDEN) for the reviewer reports, and
 [`HARDEN/harness/`](HARDEN/harness) for runnable falsifiers. Report
 vulnerabilities per [`SECURITY.md`](SECURITY.md).
+
+### Privacy
+
+The server and library make no outbound connections and send nothing off the
+machine: no telemetry, no crash reports, no update or license checks. The only
+data that leaves a process is IRC traffic to connected clients and whatever the
+operator's `log` callback writes locally.
+
+A connecting user's IP address is recorded locally (the example logs a
+`connect` event with the peer address) and, like any IRC server, is visible to
+other users: the stored host is the raw peer IP, with no host cloaking, so it
+appears in `WHO`/`WHOIS` replies and in the `nick!user@host` prefix of a user's
+messages. Treat the operator log as holding client IP addresses, and tell your
+users their address is visible server-wide. A deployment that needs host
+masking must add it; this minimal example does not cloak. See finding H-016 in
+[`HARDEN.md`](HARDEN.md).

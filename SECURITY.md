@@ -34,3 +34,8 @@ reporting so a known-accepted item is not re-filed.
   drops sessions that do not register within a deadline (`-R`, default 30s). On
   a network fronted by a trusted NAT or proxy, raise `-P` so legitimate shared
   addresses are not throttled.
+- The operator log records connecting clients' IP addresses, and a user's raw
+  IP is visible to other users through `WHO`/`WHOIS` and message prefixes (there
+  is no host cloaking). Retain and share logs accordingly, and tell users their
+  address is visible server-wide. The server itself sends nothing off the
+  machine. See finding H-016.
