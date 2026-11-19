@@ -55,6 +55,11 @@ Colin Percival's scrypt (password hashing for the example). Each has a
 its own `SO_REUSEPORT` listener so the kernel spreads connections across
 workers; shared IRC state is guarded by a single mutex.
 
+Two limits bound abuse from a single source: `-P N` caps concurrent connections
+per source IP (default 8), and `-R SEC` drops a connection that has not
+registered within the deadline (default 30s), so an idle unregistered session
+is reclaimed without waiting out the ping cycle.
+
 ## Authentication
 
 With `-A <file>` the example verifies `PASS` and `OPER` credentials against a

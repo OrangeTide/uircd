@@ -666,6 +666,9 @@ usage(const char *prog)
         "  -n NAME      server name (default irc.local)\n"
         "  -N NET       network name (default uircd)\n"
         "  -m FILE      message of the day file\n"
+        "  -P N         max connections per source IP (default 8)\n"
+        "  -R SEC       drop unregistered sessions after SEC seconds"
+        " (default 30)\n"
         "  -d           daemonize (background)\n"
         "  -h           this help\n",
         prog);
@@ -676,6 +679,7 @@ main(int argc, char **argv)
 {
     struct uircd_config cfg;
     int port = 6667, use6 = 0, nthreads = 0, require_login = 0;
+    int max_per_ip = 0, reg_timeout_s = 0;
     const char *cert = NULL, *key = NULL, *passwd = NULL;
     const char *srvname = "irc.local", *network = "uircd";
     char *motd = NULL;
@@ -684,7 +688,7 @@ main(int argc, char **argv)
 
     memset(&cfg, 0, sizeof(cfg));
 
-    while ((opt = getopt(argc, argv, "p:6t:c:k:A:Ln:N:m:dh")) != -1) {
+    while ((opt = getopt(argc, argv, "p:6t:c:k:A:Ln:N:m:P:R:dh")) != -1) {
         switch (opt) {
         case 'p': port = atoi(optarg); break;
         case '6': use6 = 1; break;
@@ -696,6 +700,8 @@ main(int argc, char **argv)
         case 'n': srvname = optarg; break;
         case 'N': network = optarg; break;
         case 'm': motd = read_file(optarg); break;
+        case 'P': max_per_ip = atoi(optarg); break;
+        case 'R': reg_timeout_s = atoi(optarg); break;
         case 'd': g_daemon = 1; break;
         case 'h': usage(argv[0]); return 0;
         default: usage(argv[0]); return 2;
@@ -738,6 +744,10 @@ main(int argc, char **argv)
     cfg.motd = motd;
     cfg.version = "uircd-1.0";
     cfg.require_login = require_login;
+    if (max_per_ip > 0)
+        cfg.max_per_ip = (unsigned)max_per_ip;
+    if (reg_timeout_s > 0)
+        cfg.reg_timeout_ms = (unsigned)reg_timeout_s * 1000u;
     cfg.out = on_out;
     cfg.drop = on_drop;
     cfg.auth = passwd ? auth_verify : NULL;

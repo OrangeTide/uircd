@@ -88,6 +88,13 @@ struct uircd_config {
     unsigned flood_lines;      /* 0 -> default; lines allowed per window */
     unsigned flood_window_ms;  /* 0 -> default */
 
+    unsigned max_per_ip;       /* 0 -> default; concurrent connections allowed
+                                * from one source IP. A further connection from
+                                * an IP already at the cap is refused. */
+    unsigned reg_timeout_ms;   /* 0 -> default; a connection that has not
+                                * registered within this window is dropped,
+                                * rather than waiting for the ping cycle. */
+
     uircd_out_cb out;          /* required */
     uircd_drop_cb drop;        /* required */
     uircd_auth_cb auth;        /* may be NULL */
@@ -115,9 +122,10 @@ void uircd_free(struct uircd *s);
  * printable numeric address (e.g. "203.0.113.4" or "2001:db8::1") used for
  * bans and logging; it is copied.
  *
- * Returns a client handle, or NULL if the connection was refused. On refusal
- * the engine has already emitted an ERROR line via out() and requested drop(),
- * so the host only needs to proceed with its normal close path.
+ * Returns a client handle, or NULL if the connection was refused (server full,
+ * per-IP cap reached, or a matching ban). On refusal the engine has already
+ * emitted an ERROR line via out() and requested drop(), so the host only needs
+ * to proceed with its normal close path.
  */
 struct uircd_client *uircd_accept(struct uircd *s, void *host_conn,
                                   const char *peer_ip);

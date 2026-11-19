@@ -35,6 +35,8 @@
 #define DEF_MAX_CHANNELS   1024u
 #define DEF_FLOOD_LINES    20u
 #define DEF_FLOOD_WINDOW   10000u
+#define DEF_MAX_PER_IP     8u
+#define DEF_REG_TIMEOUT    30000u
 
 /* user modes */
 #define UMODE_INVISIBLE  (1u << 0)
@@ -109,6 +111,7 @@ struct uircd_client {
     size_t inlen;
     int skipping;           /* discarding an over-long line */
 
+    uint64_t connect_ms;    /* first tick seen; 0 until then */
     uint64_t last_active_ms;
     int ping_sent;
     int active;             /* saw input since the last tick */
@@ -135,6 +138,7 @@ struct uircd {
     unsigned ping_interval_ms, ping_timeout_ms;
     unsigned max_clients, max_channels;
     unsigned flood_lines, flood_window_ms;
+    unsigned max_per_ip, reg_timeout_ms;
 };
 
 /****************************************************************
@@ -1696,6 +1700,9 @@ uircd_new(const struct uircd_config *cfg)
     s->flood_lines = cfg->flood_lines ? cfg->flood_lines : DEF_FLOOD_LINES;
     s->flood_window_ms = cfg->flood_window_ms ? cfg->flood_window_ms
                                               : DEF_FLOOD_WINDOW;
+    s->max_per_ip = cfg->max_per_ip ? cfg->max_per_ip : DEF_MAX_PER_IP;
+    s->reg_timeout_ms = cfg->reg_timeout_ms ? cfg->reg_timeout_ms
+                                            : DEF_REG_TIMEOUT;
     return s;
 }
 
@@ -1747,6 +1754,22 @@ uircd_accept(struct uircd *s, void *host_conn, const char *peer_ip)
         s->cfg.out(s->cfg.ud, host_conn, buf, (size_t)n);
         s->cfg.drop(s->cfg.ud, host_conn);
         return NULL;
+    }
+    if (peer_ip && s->max_per_ip) {
+        unsigned i, same = 0;
+        for (i = 0; i < s->n_clients; i++) {
+            if (strcmp(s->clients[i]->host, peer_ip) == 0 &&
+                ++same >= s->max_per_ip)
+                break;
+        }
+        if (same >= s->max_per_ip) {
+            char buf[80];
+            int n = snprintf(buf, sizeof(buf),
+                             "ERROR :Too many connections from your host\r\n");
+            s->cfg.out(s->cfg.ud, host_conn, buf, (size_t)n);
+            s->cfg.drop(s->cfg.ud, host_conn);
+            return NULL;
+        }
     }
     if (s->n_clients == s->cap_clients) {
         unsigned nc = s->cap_clients ? s->cap_clients * 2 : 64;
@@ -1849,11 +1872,25 @@ uircd_tick(struct uircd *s, uint64_t now_ms)
     for (i = 0; i < s->n_clients; i++) {
         struct uircd_client *c = s->clients[i];
 
+        if (c->connect_ms == 0)
+            c->connect_ms = now_ms ? now_ms : 1;
+
         /* reset flood window */
         if (now_ms - c->flood_reset_ms >= s->flood_window_ms) {
             c->flood_reset_ms = now_ms;
             c->flood_count = 0;
         }
+
+        /* an unregistered session must complete registration within the
+         * deadline; it does not get to idle out the full ping cycle */
+        if (!c->registered && now_ms > c->connect_ms &&
+            now_ms - c->connect_ms >= s->reg_timeout_ms) {
+            sendf(s, c, "ERROR :Registration timeout");
+            client_quit(s, c, "Registration timeout");
+            i--; /* slot now holds a different client */
+            continue;
+        }
+
         if (c->active || c->last_active_ms == 0) {
             c->active = 0;
             c->last_active_ms = now_ms;

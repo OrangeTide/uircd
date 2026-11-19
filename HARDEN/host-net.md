@@ -67,3 +67,38 @@ the engine never sees.
   the path logs nothing and continues, which is plausibly correct but unverified.
 - Thread-safety was reasoned from the locking discipline and exercised by a live
   multi-worker run under ASan, not proven with a race detector (TSan).
+
+## Round 2 (2026-11-18)
+
+### 1. Per-IP cap and registration deadline added  [H-002]
+
+- **What changed:** the engine gained two configurable limits, both resolved in
+  `uircd_new` with defaults.
+  - `max_per_ip` (default 8): `uircd_accept` counts existing clients whose stored
+    `host` equals the new `peer_ip`; at the cap it emits
+    `ERROR :Too many connections from your host`, calls `drop`, and returns NULL,
+    exactly as the server-full path does. A connection from any other IP is
+    unaffected.
+  - `reg_timeout_ms` (default 30000): each client's connect time is stamped on
+    the first `uircd_tick` that sees it (`connect_ms`). An unregistered client
+    past the deadline is sent `ERROR :Registration timeout` and quit inside
+    `uircd_tick`, with the same swap-remove bookkeeping (`i--; continue`) the
+    ping-timeout path uses. The deadline check guards `now_ms > connect_ms` so a
+    `now_ms == 0` first tick cannot underflow.
+- **Lines:** uircd.c `uircd_accept` (per-IP loop); uircd.c `uircd_tick`
+  (deadline); uircd.h `struct uircd_config` (`max_per_ip`, `reg_timeout_ms`).
+  example/miniircd.c exposes both as `-P` and `-R`.
+- **Falsifier:** `HARDEN/harness/conn_cap.c`, built and run under ASan+UBSan this
+  round. Opens `max_per_ip` connections from one IP and asserts the next is
+  refused while a second IP is accepted, then ticks past `reg_timeout_ms` (and
+  short of `ping_interval_ms`) and asserts the unregistered sessions are gone.
+  Prints `survived`. Discriminates: without the cap the extra accept returns
+  non-NULL; without the deadline the count holds until the ping cycle.
+- **State:** **FIXED.** The defaults are deliberately conservative; an operator
+  raises them with `-P`/`-R` when a trusted NAT or proxy sits in front.
+
+### Not checked this round
+
+- The per-IP match is an exact string compare on the printable `peer_ip`. A host
+  reached through both IPv4 and IPv6, or behind a shared NAT, is counted per
+  textual address, which is the intended granularity but not a per-subnet cap.

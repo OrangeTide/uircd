@@ -30,5 +30,7 @@ reporting so a known-accepted item is not re-filed.
   server; it holds scrypt password hashes.
 - Terminate TLS with a real certificate; the `-c`/`-k` options take a PEM chain
   and key. The server enforces a TLS 1.2 floor and disables renegotiation.
-- There is no per-IP connection limit yet (ledger H-002); put the server behind
-  a firewall or connection-rate limiter on an exposed network.
+- The server caps concurrent connections per source IP (`-P`, default 8) and
+  drops sessions that do not register within a deadline (`-R`, default 30s). On
+  a network fronted by a trusted NAT or proxy, raise `-P` so legitimate shared
+  addresses are not throttled.
