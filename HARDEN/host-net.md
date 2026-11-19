@@ -230,3 +230,53 @@ the paths are clean.
 - No TLS record-layer fuzzing (malformed records, fragmentation, renegotiation
   attempts); OpenSSL is still trusted as the record-layer boundary. The driver
   speaks well-formed TLS or plain garbage, not adversarially malformed records.
+
+## Round 6 (2026-11-18) -- TLS record-layer fuzzing
+
+Drove the TLS port with adversarial input (`HARDEN/harness/tls_fuzz.c`): random
+bytes, truncated records, oversized length fields, drip-fed handshakes, and
+record-shaped noise, plus a slowloris mode that holds a partial handshake open.
+OpenSSL's record parsing was taken as the trusted boundary; the target was how
+miniircd handles the SSL error returns and the handshake lifetime.
+
+### Observed
+
+- 1500 malformed-record connections across five rounds under ASan+UBSan left no
+  report, did not crash the server, did not peg CPU, and legitimate TLS clients
+  were still served afterward. miniircd's `SSL_accept`/`SSL_read`/`SSL_write`
+  error handling (the `drive_handshake` default branch, the `on_readable`/
+  `on_writable` close paths) is memory-safe on this input.
+
+### Judged
+
+#### 1. Half-open TLS handshakes were unbounded  [H-010]
+
+- **Claim:** a connection is registered with the engine only when the handshake
+  completes (`register_client` -> `uircd_accept`). `max_clients`, the per-IP cap,
+  and the registration deadline all live in the engine, so none of them applied
+  to a connection still handshaking. A slow or abandoned TLS handshake held an
+  fd and an SSL object with no deadline, and one IP could hold far more than its
+  configured cap: a slowloris on the handshake.
+- **Lines:** example/miniircd.c `on_accept` (the TLS branch sets `handshaking`
+  but does not count the conn); `drive_handshake` (waits on `WANT_READ`
+  indefinitely); `on_tick` (engine tick only, no host sweep before this round).
+- **Scenario:** with `-P 2`, open 200 connections to the TLS port, send a
+  partial record header, and never finish. The server holds all 200 (its open
+  socket count rises by ~200) and never reclaims them.
+- **Falsifier:** `HARDEN/harness/tls_fuzz.c` slowloris mode. Before the fix the
+  server's `/proc/<pid>/fd` count rises by ~200 and stays there; after, each
+  worker sweeps its own conns in `on_tick` and closes any still handshaking past
+  `HANDSHAKE_TIMEOUT_MS` (10s), so the count returns to baseline. Reproduced both
+  directions this round (held at +3s, baseline at +13s).
+- **Fix shape:** stamp `hs_start_ms` when the handshake begins; every worker's
+  `on_tick` (now armed on all workers, not just the ticker) closes its own conns
+  that are still handshaking past the deadline. **Fixed this round.** The sweep
+  path was also run under TSan (0 warnings) and ASan (no fd or memory leak across
+  the reclaim).
+
+### Not checked this round
+
+- No TLS renegotiation or fragmentation-specific fuzzing beyond the patterns
+  above; OpenSSL remains the trusted record-layer parser.
+- `HANDSHAKE_TIMEOUT_MS` is a fixed 10s, not configurable; adequate for the
+  default deployment but not tunable from the command line.

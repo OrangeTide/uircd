@@ -1,12 +1,12 @@
 # HARDEN report: HARDEN ledger -- uircd
 
-stamp: 20261119-050922
-ledger-hash: 13ba7
+stamp: 20261119-053004
+ledger-hash: 17453
 source: HARDEN.md (the ledger block)
 
 ## Top sheet
 
-As of 2026-11-19 UTC: **0 open BLOCK**, **0 open HOLD**, 0 open opportunities, 8 fixed.
+As of 2026-11-19 UTC: **0 open BLOCK**, **0 open HOLD**, 0 open opportunities, 9 fixed.
 An open BLOCK breaks a contract the project states today; an open HOLD needs a reader before it is a risk or not.
 
 ### Actions
@@ -22,10 +22,10 @@ An open BLOCK breaks a contract the project states today; an open HOLD needs a r
 |---|---|---|---|---|---|
 | BLOCK | 0 | 1 | 0 | 0 | 1 |
 | HOLD | 0 | 0 | 0 | 0 | 0 |
-| WARN | 0 | 3 | 0 | 0 | 3 |
+| WARN | 0 | 4 | 0 | 0 | 4 |
 | NOTE | 0 | 4 | 1 | 0 | 5 |
 | OPP | 0 | 0 | 0 | 0 | 0 |
-| all | | | | | 9 |
+| all | | | | | 10 |
 
 ## Every finding, one line
 
@@ -38,6 +38,7 @@ An open BLOCK breaks a contract the project states today; an open HOLD needs a r
 - H-007 BLOCK FIXED [host-net]: Heap-use-after-free in the threaded host: when one fd was ready for both write and read in a single poll pass, on_io called on_writable (which could close_conn and free the conn on a write error or drained want_close) then still called on_readable on the freed conn. Reachable by any client, no auth. Found under TSan. (`example/miniircd.c on_io; example/miniircd.c on_writable; example/miniircd.c close_conn`)
 - H-008 NOTE FIXED [host-net]: Data race on the shutdown flag g_stop: declared volatile sig_atomic_t, written unlocked by the main thread after sigwait and read by every worker, which is async-signal safe but not a thread synchronization and races under TSan (`example/miniircd.c g_stop; example/miniircd.c on_wake; example/miniircd.c worker_main`)
 - H-009 WARN FIXED [host-net]: Descriptor-exhaustion busy-loop: on accept() returning EMFILE/ENFILE/ENOBUFS/ENOMEM the handler just broke out, but libiox is level-triggered, so a connection left queued kept the listener readable and on_accept respun at 100% CPU (one core pegged) for as long as the fd table stayed full, a self-inflicted or attacker-induced livelock; the condition was also logged nowhere (`example/miniircd.c on_accept`)
+- H-010 WARN FIXED [host-net]: Half-open TLS handshakes were unbounded: a connection is registered with the engine (uircd_accept) only after the handshake completes, so max_clients, the per-IP cap, and the registration deadline (all enforced in the engine) did not apply while handshaking. A slow or abandoned TLS handshake held an fd and an SSL object indefinitely, and one IP could hold far more than its cap, a slowloris/resource-exhaustion DoS (`example/miniircd.c on_accept (TLS branch); example/miniircd.c on_tick; example/miniircd.c drive_handshake`)
 
 ## How to read this, and how to check it
 
@@ -62,4 +63,5 @@ H-006	NOTE	FIXED	repo	No SECURITY.md: the repository gave no private route to re
 H-007	BLOCK	FIXED	host-net	Heap-use-after-free in the threaded host: when one fd was ready for both write and read in a single poll pass, on_io called on_writable (which could close_conn and free the conn on a write error or drained want_close) then still called on_readable on the freed conn. Reachable by any client, no auth. Found under TSan.	example/miniircd.c on_io; example/miniircd.c on_writable; example/miniircd.c close_conn	HARDEN/harness/tsan_load.c under make tsan with -t>1: TSan reports heap-use-after-free (on_readable after close_conn in on_writable) before the fix, 0 warnings after; on_io now tracks the dispatched conn and skips the read half if close_conn freed it	HARDEN/host-net.md#3	tree:round-3
 H-008	NOTE	FIXED	host-net	Data race on the shutdown flag g_stop: declared volatile sig_atomic_t, written unlocked by the main thread after sigwait and read by every worker, which is async-signal safe but not a thread synchronization and races under TSan	example/miniircd.c g_stop; example/miniircd.c on_wake; example/miniircd.c worker_main	Same TSan run as H-007: TSan reports a data race on g_stop (main write vs worker read) before the fix, 0 after; g_stop is now atomic_int so direct reads and writes are atomic	HARDEN/host-net.md#3	tree:round-3
 H-009	WARN	FIXED	host-net	Descriptor-exhaustion busy-loop: on accept() returning EMFILE/ENFILE/ENOBUFS/ENOMEM the handler just broke out, but libiox is level-triggered, so a connection left queued kept the listener readable and on_accept respun at 100% CPU (one core pegged) for as long as the fd table stayed full, a self-inflicted or attacker-induced livelock; the condition was also logged nowhere	example/miniircd.c on_accept	HARDEN/harness/emfile_load.c against a server run with a low RLIMIT_NOFILE: server CPU over a 3s exhaustion window is ~300 ticks (a pegged core) before the fix and ~1 after; the fix frees a reserved fd to accept-and-close the backlog (shedding load, logged rate-limited) and resumes accepting when fds free	HARDEN/host-net.md#4	tree:round-4
+H-010	WARN	FIXED	host-net	Half-open TLS handshakes were unbounded: a connection is registered with the engine (uircd_accept) only after the handshake completes, so max_clients, the per-IP cap, and the registration deadline (all enforced in the engine) did not apply while handshaking. A slow or abandoned TLS handshake held an fd and an SSL object indefinitely, and one IP could hold far more than its cap, a slowloris/resource-exhaustion DoS	example/miniircd.c on_accept (TLS branch); example/miniircd.c on_tick; example/miniircd.c drive_handshake	HARDEN/harness/tls_fuzz.c slowloris mode against an ASan server with -P 2: 200 half-open handshakes from one IP are all held (server fd count rises by ~200 and never falls) before the fix; after, each worker sweeps its own conns in on_tick and closes any still handshaking past HANDSHAKE_TIMEOUT_MS (10s), so the fd count returns to baseline	HARDEN/host-net.md#6	tree:round-6
 ```

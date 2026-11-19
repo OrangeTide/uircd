@@ -22,6 +22,7 @@ H-006	NOTE	FIXED	repo	No SECURITY.md: the repository gave no private route to re
 H-007	BLOCK	FIXED	host-net	Heap-use-after-free in the threaded host: when one fd was ready for both write and read in a single poll pass, on_io called on_writable (which could close_conn and free the conn on a write error or drained want_close) then still called on_readable on the freed conn. Reachable by any client, no auth. Found under TSan.	example/miniircd.c on_io; example/miniircd.c on_writable; example/miniircd.c close_conn	HARDEN/harness/tsan_load.c under make tsan with -t>1: TSan reports heap-use-after-free (on_readable after close_conn in on_writable) before the fix, 0 warnings after; on_io now tracks the dispatched conn and skips the read half if close_conn freed it	HARDEN/host-net.md#3	tree:round-3
 H-008	NOTE	FIXED	host-net	Data race on the shutdown flag g_stop: declared volatile sig_atomic_t, written unlocked by the main thread after sigwait and read by every worker, which is async-signal safe but not a thread synchronization and races under TSan	example/miniircd.c g_stop; example/miniircd.c on_wake; example/miniircd.c worker_main	Same TSan run as H-007: TSan reports a data race on g_stop (main write vs worker read) before the fix, 0 after; g_stop is now atomic_int so direct reads and writes are atomic	HARDEN/host-net.md#3	tree:round-3
 H-009	WARN	FIXED	host-net	Descriptor-exhaustion busy-loop: on accept() returning EMFILE/ENFILE/ENOBUFS/ENOMEM the handler just broke out, but libiox is level-triggered, so a connection left queued kept the listener readable and on_accept respun at 100% CPU (one core pegged) for as long as the fd table stayed full, a self-inflicted or attacker-induced livelock; the condition was also logged nowhere	example/miniircd.c on_accept	HARDEN/harness/emfile_load.c against a server run with a low RLIMIT_NOFILE: server CPU over a 3s exhaustion window is ~300 ticks (a pegged core) before the fix and ~1 after; the fix frees a reserved fd to accept-and-close the backlog (shedding load, logged rate-limited) and resumes accepting when fds free	HARDEN/host-net.md#4	tree:round-4
+H-010	WARN	FIXED	host-net	Half-open TLS handshakes were unbounded: a connection is registered with the engine (uircd_accept) only after the handshake completes, so max_clients, the per-IP cap, and the registration deadline (all enforced in the engine) did not apply while handshaking. A slow or abandoned TLS handshake held an fd and an SSL object indefinitely, and one IP could hold far more than its cap, a slowloris/resource-exhaustion DoS	example/miniircd.c on_accept (TLS branch); example/miniircd.c on_tick; example/miniircd.c drive_handshake	HARDEN/harness/tls_fuzz.c slowloris mode against an ASan server with -P 2: 200 half-open handshakes from one IP are all held (server fd count rises by ~200 and never falls) before the fix; after, each worker sweeps its own conns in on_tick and closes any still handshaking past HANDSHAKE_TIMEOUT_MS (10s), so the fd count returns to baseline	HARDEN/host-net.md#6	tree:round-6
 ```
 
 ## Round log
@@ -99,3 +100,20 @@ H-009	WARN	FIXED	host-net	Descriptor-exhaustion busy-loop: on accept() returning
   is unchanged.
   Not checked this round: no TLS record-layer fuzzing (malformed/fragmented
   records, renegotiation); OpenSSL remains the trusted record-layer boundary.
+
+- 2026-11-18, round 6 (fixes in the round-6 working tree, `tree:round-6`). Scope:
+  TLS record-layer fuzzing. Drove the TLS port with `HARDEN/harness/tls_fuzz.c`
+  (random bytes, truncated and oversized records, drip-fed and record-shaped
+  noise, plus a slowloris mode). 1500 malformed-record connections under
+  ASan+UBSan: no report, no crash, no CPU peg, legit clients still served, so
+  miniircd's SSL error handling is memory-safe. Found H-010: half-open TLS
+  handshakes were unbounded because a connection is registered with the engine
+  only after the handshake, so max_clients, the per-IP cap, and the registration
+  deadline did not apply; with `-P 2` a single IP held 200 half-open handshakes
+  (server fd count +200, never reclaimed). Fixed by stamping `hs_start_ms` and
+  having every worker sweep its own conns in `on_tick`, closing any still
+  handshaking past `HANDSHAKE_TIMEOUT_MS` (10s); the fd count then returns to
+  baseline. The sweep path was run under TSan (0 warnings) and ASan (no leak).
+  `make check` and the optimized build still pass. H-010 is WARN, FIXED.
+  Not checked this round: no renegotiation/fragmentation-specific fuzzing beyond
+  the patterns above; `HANDSHAKE_TIMEOUT_MS` is fixed, not command-line tunable.

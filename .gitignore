@@ -7,3 +7,4 @@ HARDEN/harness/ban_negation
 HARDEN/harness/tsan_load
 HARDEN/harness/emfile_load
 HARDEN/harness/tls_load
+HARDEN/harness/tls_fuzz

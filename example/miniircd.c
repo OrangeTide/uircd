@@ -41,6 +41,7 @@
 #define MAX_OUTBUF   (1u << 20)   /* 1 MiB per-connection output cap */
 #define READ_CHUNK   8192
 #define TICK_MS      1000
+#define HANDSHAKE_TIMEOUT_MS 10000 /* reclaim a TLS handshake stalled this long */
 
 struct worker;
 
@@ -49,6 +50,7 @@ struct conn {
     struct worker *w;
     SSL *ssl;                 /* NULL for plaintext */
     int handshaking;          /* TLS handshake not yet complete */
+    uint64_t hs_start_ms;     /* when the handshake began, for its deadline */
     int rd_want_write;        /* SSL_read wants the socket writable */
     int want_close;           /* close once output has drained */
     struct uircd_client *cli; /* NULL before register / after uircd dropped */
@@ -504,6 +506,7 @@ on_accept(struct iox_loop *loop, int fd, unsigned events, void *arg)
             SSL_set_fd(c->ssl, cfd);
             SSL_set_accept_state(c->ssl);
             c->handshaking = 1;
+            c->hs_start_ms = now_ms();
             drive_handshake(c);
         } else {
             register_client(c);
@@ -568,13 +571,26 @@ static void
 on_tick(struct iox_loop *loop, void *arg)
 {
     struct worker *w = arg;
+    uint64_t now = now_ms();
+    struct conn *c, *next;
 
     pthread_mutex_lock(&g_lock);
-    uircd_tick(g_srv, now_ms());
+    if (w->is_ticker)
+        uircd_tick(g_srv, now);
+    /* Reclaim connections stuck in the TLS handshake. These are not yet
+     * registered with the engine, so max_clients, the per-IP cap, and the
+     * registration deadline do not apply to them; without this a slow or
+     * abandoned handshake would hold an fd and an SSL object indefinitely.
+     * Each worker sweeps only its own conns, which it alone may free. */
+    for (c = w->conns; c; c = next) {
+        next = c->next; /* close_conn unlinks c */
+        if (c->handshaking && now - c->hs_start_ms >= HANDSHAKE_TIMEOUT_MS)
+            close_conn(c);
+    }
     pthread_mutex_unlock(&g_lock);
 
     /* wake every worker so queued PINGs and timeout drops are flushed */
-    {
+    if (w->is_ticker) {
         int i;
         for (i = 0; i < g_nworkers; i++)
             wake(&g_workers[i]);
@@ -634,8 +650,9 @@ worker_main(void *arg)
 
     iox_fd_add(w->loop, w->listen_fd, IOX_READ, on_accept, w);
     iox_fd_add(w->loop, w->wake_fd[0], IOX_READ, on_wake, w);
-    if (w->is_ticker)
-        iox_timer_add(w->loop, TICK_MS, on_tick, w);
+    /* every worker ticks: the ticker also drives the engine, but all workers
+     * must sweep their own stalled TLS handshakes */
+    iox_timer_add(w->loop, TICK_MS, on_tick, w);
 
     iox_loop_run(w->loop);
     return NULL;
