@@ -3,10 +3,13 @@
 #include "uircd.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -1709,6 +1712,76 @@ uircd_new(const struct uircd_config *cfg)
     s->reg_timeout_ms = cfg->reg_timeout_ms ? cfg->reg_timeout_ms
                                             : DEF_REG_TIMEOUT;
     return s;
+}
+
+static int
+cfg_parse_uint(const char *s, unsigned *out)
+{
+    char *end;
+    unsigned long v;
+
+    if (!s || !*s)
+        return -1;
+    errno = 0;
+    v = strtoul(s, &end, 10);
+    if (errno != 0 || *end != '\0' || v > UINT_MAX)
+        return -1;
+    *out = (unsigned)v;
+    return 0;
+}
+
+static int
+cfg_parse_bool(const char *s, int *out)
+{
+    unsigned u;
+
+    if (cfg_parse_uint(s, &u) == 0) {
+        *out = (u != 0);
+        return 0;
+    }
+    if (!strcasecmp(s, "true") || !strcasecmp(s, "yes") ||
+        !strcasecmp(s, "on")) {
+        *out = 1;
+        return 0;
+    }
+    if (!strcasecmp(s, "false") || !strcasecmp(s, "no") ||
+        !strcasecmp(s, "off")) {
+        *out = 0;
+        return 0;
+    }
+    return -1;
+}
+
+int
+uircd_config_set(struct uircd_config *cfg, const char *key, const char *value)
+{
+    if (!cfg || !key || !value)
+        return UIRCD_ERR;
+
+    /* String keys store the pointer, not a copy: value must stay valid for the
+     * engine's lifetime, exactly as the config struct's string fields require. */
+    if (!strcmp(key, "server-name")) { cfg->server_name = value; return UIRCD_OK; }
+    if (!strcmp(key, "network"))     { cfg->network = value;     return UIRCD_OK; }
+    if (!strcmp(key, "motd"))        { cfg->motd = value;        return UIRCD_OK; }
+    if (!strcmp(key, "version"))     { cfg->version = value;     return UIRCD_OK; }
+
+    if (!strcmp(key, "require-login"))
+        return cfg_parse_bool(value, &cfg->require_login) ? UIRCD_ERR : UIRCD_OK;
+
+#define UINT_KEY(name, field) \
+    if (!strcmp(key, (name))) \
+        return cfg_parse_uint(value, &cfg->field) ? UIRCD_ERR : UIRCD_OK
+    UINT_KEY("ping-interval-ms", ping_interval_ms);
+    UINT_KEY("ping-timeout-ms", ping_timeout_ms);
+    UINT_KEY("max-clients", max_clients);
+    UINT_KEY("max-channels", max_channels);
+    UINT_KEY("flood-lines", flood_lines);
+    UINT_KEY("flood-window-ms", flood_window_ms);
+    UINT_KEY("max-per-ip", max_per_ip);
+    UINT_KEY("reg-timeout-ms", reg_timeout_ms);
+#undef UINT_KEY
+
+    return UIRCD_ERR; /* unknown key */
 }
 
 void

@@ -65,9 +65,12 @@ cannot hold a slot indefinitely.
 ## Configuration
 
 The uircd library takes its settings as a struct (`struct uircd_config` passed
-to `uircd_new`); that is its settings API, and it reads no files. The example
-host adds its own settings and wires both to a gitconfig-style file, so the
-config format lives in the host, not the library.
+to `uircd_new`); that is its settings API, and it reads no files. A host that
+would rather not name each struct field can set settings by string key with
+`uircd_config_set(&cfg, "max-clients", "2048")`, which parses and validates the
+value (see `uircd.h` for the key list). The example host adds its own settings
+and wires both to a gitconfig-style file, so the config format lives in the
+host, not the library.
 
 ```sh
 ./miniircd -f miniircd.conf              # read settings from a file

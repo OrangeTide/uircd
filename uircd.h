@@ -110,6 +110,26 @@ struct uircd_config {
  *  remain valid for the engine's lifetime. Returns NULL on failure. */
 struct uircd *uircd_new(const struct uircd_config *cfg);
 
+/** Apply one setting to a config by string key, before uircd_new().
+ *
+ * This lets a host wire a config file or command line without naming each
+ * struct field. Returns UIRCD_OK, or UIRCD_ERR for an unknown key or a value
+ * that does not parse. The callbacks and ud are not settable this way.
+ *
+ * Keys (value shown in parentheses):
+ *   server-name, network, motd, version   (string)
+ *   require-login                          (0/1 or true/false/yes/no/on/off)
+ *   ping-interval-ms, ping-timeout-ms      (unsigned)
+ *   max-clients, max-channels              (unsigned)
+ *   flood-lines, flood-window-ms           (unsigned)
+ *   max-per-ip, reg-timeout-ms             (unsigned)
+ *
+ * A string key stores the pointer, not a copy, so value must remain valid for
+ * the engine's lifetime, the same rule the config struct's string fields follow.
+ */
+int uircd_config_set(struct uircd_config *cfg, const char *key,
+                     const char *value);
+
 void uircd_free(struct uircd *s);
 
 /****************************************************************
