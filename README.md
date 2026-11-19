@@ -80,11 +80,13 @@ host, not the library.
 Command-line options override the file. `./miniircd -C -f miniircd.conf` parses
 and checks a configuration then exits, without binding a port. `example/miniircd.conf`
 is a documented sample; the sections are `[server]` (name, network, motd), `[listen]` (port,
-ipv6), `[tls]` (cert, key, handshake-timeout), `[auth]` (passwd, require-login),
-and `[limits]` (threads, accept-backoff-ms, max-per-ip, reg-timeout,
-max-clients, max-channels, ping-interval, ping-timeout, flood-lines,
-flood-window). Times are in seconds;
-an omitted key keeps the built-in default. `-h` lists every command-line option.
+ipv6), `[tls]` (cert, key, handshake-timeout), `[auth]` (passwd, require-login,
+auth-deadline-ms, auth-jitter-ms, kdf-threads), and `[limits]` (threads,
+accept-backoff-ms, max-per-ip, reg-timeout, max-clients, max-channels,
+ping-interval, ping-timeout, flood-lines, flood-window). Times in `[limits]` are
+in seconds; the `[auth]` deadline and jitter are in milliseconds, as their names
+say. An omitted key keeps the built-in default. `-h` lists every command-line
+option.
 
 ## Authentication
 
@@ -101,6 +103,17 @@ Each line is `name:scrypt:N:r:p:salt_b64:hash_b64:flags`, flags being `c` (may
 connect) and `o` (may become an operator). Append the lines to your passwd
 file. Clients log in with `PASS account:password`; `-L` makes a valid login
 mandatory to connect.
+
+The example verifies logins asynchronously. Its auth callback returns
+`UIRCD_AUTH_PENDING`, running scrypt in a small off-lock thread pool
+(`[auth] kdf-threads`) so one login never stalls the engine, and it answers
+every attempt at a fixed deadline (`[auth] auth-deadline-ms` plus up to
+`auth-jitter-ms`) whether or not a hash was checked, so response timing does not
+reveal which account names exist. The deadline must exceed the slowest
+configured scrypt; the default (120 ms) suits the tool's default work factors.
+The library's `uircd_auth_cb` supports this through the `UIRCD_AUTH_PENDING`
+verdict and `uircd_auth_complete()`; a host that returns only `UIRCD_OK`/`UIRCD_ERR`
+is still verified synchronously.
 
 ## Administrative commands
 

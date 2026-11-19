@@ -1,6 +1,8 @@
 # DESIGN: asynchronous authentication
 
-Status: proposed (not implemented). Resolves H-003 and H-012.
+Status: implemented in round 12 (`tree:round-12`). Resolves H-003, H-012, and
+the H-013 opportunity row. The sections below are the design as built; one point
+not anticipated here is recorded under "As built".
 
 ## Problem
 
@@ -148,6 +150,19 @@ job is zeroed after compute.
   correctness and scalability, justified by the measured ~61 ms global stall.
 - `BASE` must exceed the slowest configured scrypt. Validate `BASE` >= the
   measured cost of the heaviest passwd entry at load, or calibrate at boot.
+
+## As built
+
+One thing the design did not anticipate: the vendored scrypt selects its `smix`
+implementation lazily on the first call into a write-once global, which is safe
+from one thread but races across the new KDF pool threads on their first
+concurrent calls (caught by TSan). It is resolved host-side with `auth_warmup()`,
+one trivial scrypt on the main thread before the pool starts, leaving the
+vendored code unchanged. The KDF job references its connection only by
+`{worker, auth_id}` (a monotonic id), never a conn pointer, which is how the
+"generation token" lifetime guard is realized here. If the KDF pool is saturated
+long enough that a job is not computed within the deadline plus a bounded poll
+window (~1s), the login fails closed; that is the intended bounded-CPU tradeoff.
 
 ## Acceptance tests (falsifiers for the OPP row)
 

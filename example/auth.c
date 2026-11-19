@@ -141,26 +141,65 @@ find_entry(const char *name)
     return NULL;
 }
 
-int
-auth_verify(void *ud, enum uircd_auth_kind kind, const char *name,
-            const char *pass)
+void
+auth_lookup(enum uircd_auth_kind kind, const char *name, const char *pass,
+            struct auth_job *j)
 {
     struct entry *e;
-    unsigned char out[HASH_LEN];
     unsigned need = (kind == UIRCD_AUTH_OPER) ? FLAG_OPER : FLAG_CONNECT;
 
-    (void)ud;
-    if (!pass)
-        return UIRCD_ERR;
+    memset(j, 0, sizeof(*j));
+    if (!pass) {
+        j->miss = 1;
+        return;
+    }
+    j->passlen = strlen(pass);
+    if (j->passlen >= sizeof(j->pass))
+        j->passlen = sizeof(j->pass) - 1;
+    memcpy(j->pass, pass, j->passlen);
+    j->pass[j->passlen] = '\0';
 
     e = find_entry(name ? name : "*");
-    if (!e || !(e->flags & need))
-        return UIRCD_ERR;
+    if (!e || !(e->flags & need)) {
+        j->miss = 1;
+        return;
+    }
+    j->n = e->n;
+    j->r = e->r;
+    j->p = e->p;
+    memcpy(j->salt, e->salt, e->saltlen);
+    j->saltlen = e->saltlen;
+    memcpy(j->hash, e->hash, HASH_LEN);
+}
 
-    if (crypto_scrypt((const uint8_t *)pass, strlen(pass),
-                      e->salt, e->saltlen, e->n, e->r, e->p,
-                      out, sizeof(out)) != 0)
-        return UIRCD_ERR;
+int
+auth_compute(struct auth_job *j)
+{
+    unsigned char out[HASH_LEN];
+    int ok = 0;
 
-    return ct_equal(out, e->hash, HASH_LEN) ? UIRCD_OK : UIRCD_ERR;
+    if (!j->miss &&
+        crypto_scrypt((const uint8_t *)j->pass, j->passlen,
+                      j->salt, j->saltlen, j->n, j->r, j->p,
+                      out, sizeof(out)) == 0)
+        ok = ct_equal(out, j->hash, HASH_LEN);
+
+    /* wipe sensitive material regardless of the outcome */
+    memset(j->pass, 0, sizeof(j->pass));
+    memset(out, 0, sizeof(out));
+    return ok;
+}
+
+void
+auth_warmup(void)
+{
+    unsigned char salt[1] = { 0 };
+    unsigned char out[HASH_LEN];
+
+    /* N=2 (smallest legal power of two) with r=p=1 keeps this cheap; its only
+     * purpose is to resolve the vendored scrypt's internal smix function
+     * pointer on this thread before the KDF pool runs it from several. */
+    crypto_scrypt((const uint8_t *)"", 0, salt, sizeof(salt), 2, 1, 1,
+                  out, sizeof(out));
+    memset(out, 0, sizeof(out));
 }

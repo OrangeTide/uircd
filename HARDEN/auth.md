@@ -97,3 +97,51 @@ code path, and a design that resolves both.
 - **Fix shape:** the async-auth redesign in `HARDEN/DESIGN-async-auth.md`: run the
   KDF off the lock in a bounded pool and deliver the verdict at a scheduled
   deadline. The same design closes H-003. **Open**, designed not yet built.
+
+## Round 3 (2026-11-19)
+
+Implemented the async-auth design, which resolves H-003, H-012, and the H-013
+opportunity row. No new credential-surface finding; this section records what the
+implementation changed and the one concurrency defect it surfaced.
+
+### Changed
+
+- `auth.c` split: `auth_lookup` does the cheap table lookup and snapshots the
+  stored parameters (or marks a miss) and may run under a lock; `auth_compute`
+  runs scrypt and the constant-time compare with no lock, wipes the password
+  copy, and runs no scrypt on a miss. `auth_verify` is gone.
+- The engine's auth callback now receives the connection handle and may return
+  `UIRCD_AUTH_PENDING`. `cmd_pass`/`cmd_oper` park the client on that verdict and
+  the engine holds the client's further input (bounded 4 KiB) until
+  `uircd_auth_complete` delivers the result and replays the held input.
+- The host runs a fixed KDF thread pool off `g_lock`, arms a per-attempt deadline
+  timer (`BASE + jitter`, same formula for a hit and a miss), and routes the
+  result back by `{worker, auth_id}` rather than a conn pointer, so a connection
+  that closes mid-KDF is safe.
+
+### Judged
+
+#### 1. First-call race in the vendored scrypt under the new KDF pool  [no row]
+
+- **Observed:** `third_party/scrypt/crypto_scrypt.c` lazily selects its `smix`
+  implementation on the first call (`if (smix_func == NULL) selectsmix();`), a
+  write-once global. Running scrypt from the single engine thread never raced on
+  it, but the new KDF pool calls it from several threads; TSan reported a data
+  race on `smix_func` between two pool threads on the first concurrent calls.
+- **Falsifier:** a concurrent login load under TSan reports 0 data races. Before
+  the fix TSan flags the `smix_func` write/read; after, 0.
+- **Fix:** host-side `auth_warmup()` runs one trivial scrypt on the main thread
+  before the pool starts, resolving `smix_func` while only one thread exists; the
+  pool threads then only read it. The vendored code is unchanged. Re-run under
+  TSan over concurrent logins (including many connections that close mid-KDF): 0
+  races. Not a ledger row: it was introduced and closed within this round's work
+  and never shipped.
+
+### Not checked this round
+
+- No dedicated timing-distribution harness: the equal-deadline property is
+  structural (the response is scheduled to the same `BASE + jitter` formula on
+  both paths and the KDF result is only latched, not delivered early).
+- No standalone cross-worker PING-RTT harness for H-012: the off-lock property is
+  structural (`auth_compute` takes no engine lock) and TSan-confirmed.
+- The vendored scrypt and its parameters were not otherwise re-audited.

@@ -46,9 +46,21 @@
 #define DEF_ACCEPT_BACKOFF_MS 100  /* pause accepting this long on fd exhaustion */
 #define DEF_HANDSHAKE_TIMEOUT_MS 10000 /* reclaim a stalled TLS handshake */
 
+/* Asynchronous authentication (see "Async auth" below and
+ * HARDEN/DESIGN-async-auth.md). A deferred login's verdict is answered at a
+ * fixed deadline regardless of whether a KDF ran, so response timing carries no
+ * hit/miss signal; the KDF itself runs in a bounded pool off the engine lock. */
+#define DEF_AUTH_DEADLINE_MS 120   /* must exceed the slowest configured scrypt */
+#define DEF_AUTH_JITTER_MS   20    /* random spread added to the deadline */
+#define DEF_KDF_THREADS      2     /* scrypt worker threads */
+#define KDF_QUEUE_MAX        1024  /* bounded backlog of pending KDF jobs */
+
 /* Host-side timers, configurable (see load_config). */
 static unsigned g_handshake_timeout_ms = DEF_HANDSHAKE_TIMEOUT_MS;
 static unsigned g_accept_backoff_ms = DEF_ACCEPT_BACKOFF_MS;
+static unsigned g_auth_deadline_ms = DEF_AUTH_DEADLINE_MS;
+static unsigned g_auth_jitter_ms = DEF_AUTH_JITTER_MS;
+static int g_kdf_threads = DEF_KDF_THREADS;
 
 struct worker;
 
@@ -61,6 +73,10 @@ struct conn {
     int rd_want_write;        /* SSL_read wants the socket writable */
     int want_close;           /* close once output has drained */
     struct uircd_client *cli; /* NULL before register / after uircd dropped */
+
+    uint64_t auth_id;         /* nonzero while a deferred auth is outstanding */
+    int auth_have_result;     /* the KDF has latched a verdict */
+    int auth_result;          /* 1 accept, 0 reject */
 
     char *out;
     size_t outlen, outpos, outcap;
@@ -97,6 +113,7 @@ static int g_daemon;
 static void on_readable(struct iox_loop *, int, unsigned, void *);
 static void on_writable(struct iox_loop *, int, unsigned, void *);
 static void on_io(struct iox_loop *, int, unsigned, void *);
+static void on_auth_deadline(struct iox_loop *, void *);
 
 /****************************************************************
  * Small helpers
@@ -217,6 +234,11 @@ close_conn(struct conn *c)
     /* If on_io is mid-dispatch on this conn, tell it not to touch c again. */
     if (c->w->io_cur == c)
         c->w->io_cur_freed = 1;
+    /* Outstanding KDF results and the deadline timer find their conn by
+     * auth_id among a worker's live conns; clearing it here means a result
+     * that lands after this teardown, and a timer that fires later, both find
+     * no match and harmlessly drop. */
+    c->auth_id = 0;
     iox_fd_remove(c->w->loop, c->fd);
     if (c->cli) {
         uircd_closed(g_srv, c->cli);
@@ -261,6 +283,247 @@ on_log(void *ud, const char *event, const char *detail)
 {
     (void)ud;
     logmsg("[%s] %s", event, detail ? detail : "");
+}
+
+/****************************************************************
+ * Async auth: off-lock KDF pool and deadline-scheduled verdicts
+ *
+ * The uircd auth callback (on_auth) runs under g_lock on a connection's owner
+ * thread. It does only the cheap passwd lookup, then enqueues the scrypt work
+ * for the KDF pool and arms a one-shot deadline timer on the owner's loop, and
+ * returns UIRCD_AUTH_PENDING. A pool thread runs scrypt with no lock held and
+ * latches the verdict on the connection. At the deadline the timer delivers the
+ * verdict through uircd_auth_complete. Because the answer is tied to the
+ * deadline and not to when (or whether) the KDF ran, a known-bad name and an
+ * unknown name are indistinguishable by timing, and the KDF never blocks the
+ * engine lock. A job references its connection only by {worker, auth_id}, never
+ * by pointer, so a connection that closes mid-KDF is safe: the id simply no
+ * longer matches any live conn. See HARDEN/DESIGN-async-auth.md.
+ ****************************************************************/
+
+struct kdf_job {
+    int worker_id;
+    uint64_t auth_id;
+    struct auth_job aj;
+    struct kdf_job *next;
+};
+
+struct auth_timer {
+    int worker_id;
+    uint64_t auth_id;
+    int polls;
+};
+
+static atomic_uint_least64_t g_auth_seq;
+static pthread_mutex_t g_kdf_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_kdf_cond = PTHREAD_COND_INITIALIZER;
+static struct kdf_job *g_kdf_head, *g_kdf_tail;
+static int g_kdf_count;
+static pthread_t *g_kdf_pool;
+static int g_kdf_nthreads;
+static int g_kdf_stop;
+
+/* xorshift64; called only under g_lock (auth is serialized there), so the
+ * single state needs no synchronization of its own. */
+static uint64_t g_rng = 0x9e3779b97f4a7c15ULL;
+
+static unsigned
+jitter_ms(unsigned span)
+{
+    if (span == 0)
+        return 0;
+    g_rng ^= g_rng << 13;
+    g_rng ^= g_rng >> 7;
+    g_rng ^= g_rng << 17;
+    return (unsigned)(g_rng % ((uint64_t)span + 1));
+}
+
+/* g_lock held. Latch a verdict onto the connection awaiting this auth_id. */
+static void
+deliver_result(int wid, uint64_t auth_id, int ok)
+{
+    struct conn *c;
+
+    if (wid < 0 || wid >= g_nworkers || auth_id == 0)
+        return;
+    for (c = g_workers[wid].conns; c; c = c->next) {
+        if (c->auth_id == auth_id) {
+            c->auth_result = ok;
+            c->auth_have_result = 1;
+            return;
+        }
+    }
+    /* No match: the connection closed before the KDF finished. Drop it. */
+}
+
+/* uircd auth callback, invoked under g_lock on the connection's owner thread. */
+static int
+on_auth(void *ud, void *conn, enum uircd_auth_kind kind, const char *name,
+        const char *pass)
+{
+    struct conn *c = conn;
+    struct kdf_job *j;
+    struct auth_timer *t;
+    uint64_t id;
+    unsigned delay;
+    (void)ud;
+
+    j = malloc(sizeof(*j));
+    if (!j)
+        return UIRCD_ERR;                 /* fail closed, synchronously */
+    auth_lookup(kind, name, pass, &j->aj);
+
+    t = malloc(sizeof(*t));
+    if (!t) {
+        memset(j->aj.pass, 0, sizeof(j->aj.pass));
+        free(j);
+        return UIRCD_ERR;
+    }
+
+    id = (uint64_t)atomic_fetch_add_explicit(&g_auth_seq, 1,
+                                             memory_order_relaxed) + 1;
+    c->auth_id = id;
+    c->auth_have_result = 0;
+    c->auth_result = 0;
+
+    j->worker_id = c->w->id;
+    j->auth_id = id;
+    t->worker_id = c->w->id;
+    t->auth_id = id;
+    t->polls = 0;
+
+    delay = g_auth_deadline_ms + jitter_ms(g_auth_jitter_ms);
+    iox_timer_add(c->w->loop, (int)delay, on_auth_deadline, t);
+
+    pthread_mutex_lock(&g_kdf_lock);
+    if (g_kdf_count >= KDF_QUEUE_MAX) {
+        /* Backlog full: skip the compute and latch a rejection now. It is still
+         * delivered at the deadline, so a saturated pool leaks no timing. */
+        pthread_mutex_unlock(&g_kdf_lock);
+        memset(j->aj.pass, 0, sizeof(j->aj.pass));
+        free(j);
+        c->auth_have_result = 1;
+        c->auth_result = 0;
+        return UIRCD_AUTH_PENDING;
+    }
+    j->next = NULL;
+    if (g_kdf_tail)
+        g_kdf_tail->next = j;
+    else
+        g_kdf_head = j;
+    g_kdf_tail = j;
+    g_kdf_count++;
+    pthread_cond_signal(&g_kdf_cond);
+    pthread_mutex_unlock(&g_kdf_lock);
+    return UIRCD_AUTH_PENDING;
+}
+
+/* Deadline timer, owner thread. Deliver the latched verdict; if the KDF has not
+ * finished (a saturated pool, not the common case), re-arm briefly rather than
+ * fail a valid login, up to a bound. */
+static void
+on_auth_deadline(struct iox_loop *loop, void *arg)
+{
+    struct auth_timer *t = arg;
+    struct worker *w = &g_workers[t->worker_id];
+    struct conn *c;
+
+    pthread_mutex_lock(&g_lock);
+    for (c = w->conns; c; c = c->next)
+        if (c->auth_id == t->auth_id)
+            break;
+    if (!c) {                             /* connection closed; nothing to do */
+        pthread_mutex_unlock(&g_lock);
+        free(t);
+        return;
+    }
+    if (!c->auth_have_result) {
+        if (t->polls++ < 50) {            /* wait out a backed-up KDF pool */
+            iox_timer_add(loop, 20, on_auth_deadline, t);
+            pthread_mutex_unlock(&g_lock);
+            return;
+        }
+        c->auth_result = 0;               /* give up: fail closed */
+    }
+    c->auth_id = 0;
+    if (c->cli)
+        uircd_auth_complete(g_srv, c->cli, c->auth_result);
+    if (c->want_close && c->outpos == c->outlen)
+        close_conn(c);
+    else
+        update_events(c);
+    pthread_mutex_unlock(&g_lock);
+    free(t);
+}
+
+static void *
+kdf_main(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        struct kdf_job *j;
+        int ok;
+
+        pthread_mutex_lock(&g_kdf_lock);
+        while (!g_kdf_head && !g_kdf_stop)
+            pthread_cond_wait(&g_kdf_cond, &g_kdf_lock);
+        if (!g_kdf_head && g_kdf_stop) {
+            pthread_mutex_unlock(&g_kdf_lock);
+            return NULL;
+        }
+        j = g_kdf_head;
+        g_kdf_head = j->next;
+        if (!g_kdf_head)
+            g_kdf_tail = NULL;
+        g_kdf_count--;
+        pthread_mutex_unlock(&g_kdf_lock);
+
+        ok = auth_compute(&j->aj);        /* no lock; wipes the password */
+
+        pthread_mutex_lock(&g_lock);
+        deliver_result(j->worker_id, j->auth_id, ok);
+        pthread_mutex_unlock(&g_lock);
+        free(j);
+    }
+}
+
+static int
+kdf_pool_start(int nthreads)
+{
+    int i;
+
+    g_kdf_pool = calloc((size_t)nthreads, sizeof(*g_kdf_pool));
+    if (!g_kdf_pool)
+        return -1;
+    for (i = 0; i < nthreads; i++) {
+        if (pthread_create(&g_kdf_pool[i], NULL, kdf_main, NULL) != 0)
+            return -1;
+        g_kdf_nthreads = i + 1;
+    }
+    return 0;
+}
+
+static void
+kdf_pool_stop(void)
+{
+    struct kdf_job *j;
+    int i;
+
+    pthread_mutex_lock(&g_kdf_lock);
+    g_kdf_stop = 1;
+    pthread_cond_broadcast(&g_kdf_cond);
+    pthread_mutex_unlock(&g_kdf_lock);
+    for (i = 0; i < g_kdf_nthreads; i++)
+        pthread_join(g_kdf_pool[i], NULL);
+    for (j = g_kdf_head; j; ) {
+        struct kdf_job *n = j->next;
+        memset(j->aj.pass, 0, sizeof(j->aj.pass));
+        free(j);
+        j = n;
+    }
+    g_kdf_head = g_kdf_tail = NULL;
+    free(g_kdf_pool);
+    g_kdf_pool = NULL;
 }
 
 /****************************************************************
@@ -758,6 +1021,9 @@ struct hostconf {
     char *cert, *key, *passwd, *srvname, *network, *motd_path;
     unsigned handshake_timeout_s;   /* host-side TLS handshake deadline */
     unsigned accept_backoff_ms;     /* host-side accept pause on fd exhaustion */
+    unsigned auth_deadline_ms;      /* deferred-login response deadline */
+    unsigned auth_jitter_ms;        /* random spread added to the deadline */
+    int kdf_threads;                /* scrypt worker threads */
 
     /* Engine limits are accumulated here through the library's own string
      * setter (see the [limits] handlers), rather than poking struct fields. */
@@ -845,6 +1111,11 @@ hostconf_set(struct hostconf *hc, const char *sec, const char *name,
     if (MATCH("auth", "passwd"))    return set_str(&hc->passwd, val);
     if (MATCH("auth", "require-login"))
         { hc->require_login = parse_bool(val); return 0; }
+    if (MATCH("auth", "auth-deadline-ms"))
+        { hc->auth_deadline_ms = (unsigned)atoi(val); return 0; }
+    if (MATCH("auth", "auth-jitter-ms"))
+        { hc->auth_jitter_ms = (unsigned)atoi(val); return 0; }
+    if (MATCH("auth", "kdf-threads")) { hc->kdf_threads = atoi(val); return 0; }
     if (MATCH("limits", "threads")) { hc->nthreads = atoi(val); return 0; }
     if (MATCH("limits", "accept-backoff-ms"))
         { hc->accept_backoff_ms = (unsigned)atoi(val); return 0; }
@@ -1050,6 +1321,14 @@ main(int argc, char **argv)
         g_handshake_timeout_ms = hc.handshake_timeout_s * 1000u;
     if (hc.accept_backoff_ms > 0)
         g_accept_backoff_ms = hc.accept_backoff_ms;
+    if (hc.auth_deadline_ms > 0)
+        g_auth_deadline_ms = hc.auth_deadline_ms;
+    if (hc.auth_jitter_ms > 0)
+        g_auth_jitter_ms = hc.auth_jitter_ms;
+    if (hc.kdf_threads > 0)
+        g_kdf_threads = hc.kdf_threads;
+    if (g_kdf_threads > 64)
+        g_kdf_threads = 64;
 
     if (check_only) {
         /* configuration parsed and validated; do not bind or start threads */
@@ -1098,8 +1377,9 @@ main(int argc, char **argv)
     cfg.require_login = hc.require_login;
     cfg.out = on_out;
     cfg.drop = on_drop;
-    cfg.auth = hc.passwd ? auth_verify : NULL;
+    cfg.auth = hc.passwd ? on_auth : NULL;
     cfg.log = on_log;
+    g_rng ^= now_ms();
     g_srv = uircd_new(&cfg);
     if (!g_srv) {
         fprintf(stderr, "uircd_new failed\n");
@@ -1145,6 +1425,18 @@ main(int argc, char **argv)
             return 1;
         }
     }
+    /* Start the KDF pool before any worker accepts, so a login that arrives
+     * immediately has a thread to run its scrypt. Only needed when auth is on.
+     * Warm the vendored scrypt's lazy CPU-feature selection on this thread
+     * first, so the pool threads never race to initialize it. */
+    if (hc.passwd) {
+        auth_warmup();
+        if (kdf_pool_start(g_kdf_threads) != 0) {
+            fprintf(stderr, "cannot start KDF pool\n");
+            return 1;
+        }
+    }
+
     for (i = 0; i < hc.nthreads; i++) {
         if (pthread_create(&g_workers[i].thread, NULL, worker_main,
                            &g_workers[i]) != 0) {
@@ -1168,6 +1460,11 @@ main(int argc, char **argv)
         wake(&g_workers[i]);
     for (i = 0; i < hc.nthreads; i++)
         pthread_join(g_workers[i].thread, NULL);
+
+    /* Workers are stopped; drain and join the KDF pool before tearing down the
+     * connections and engine its threads may still reference. */
+    if (hc.passwd)
+        kdf_pool_stop();
 
     for (i = 0; i < hc.nthreads; i++) {
         while (g_workers[i].conns)

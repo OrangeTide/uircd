@@ -21,6 +21,11 @@
 #define UIRCD_OK  (0)
 #define UIRCD_ERR (-1)
 
+/* An auth callback may return this instead of UIRCD_OK/UIRCD_ERR to defer the
+ * verdict: the host will deliver it later with uircd_auth_complete(). See the
+ * auth callback and uircd_auth_complete() below. */
+#define UIRCD_AUTH_PENDING (1)
+
 struct uircd;
 struct uircd_client;
 
@@ -50,13 +55,21 @@ typedef void (*uircd_out_cb)(void *ud, void *conn,
  */
 typedef void (*uircd_drop_cb)(void *ud, void *conn);
 
-/** Verify a credential. Return UIRCD_OK to accept, UIRCD_ERR to reject.
+/** Verify a credential.
  *
+ * conn is the opaque handle the host passed to uircd_accept() for the client
+ * being authenticated, so the host can route a deferred verdict back to it.
  * name is NULL for UIRCD_AUTH_USER when only a password was supplied. A NULL
  * callback means no user authentication is required; OPER always fails when
  * the callback is NULL.
+ *
+ * Return UIRCD_OK to accept or UIRCD_ERR to reject synchronously. Return
+ * UIRCD_AUTH_PENDING to decide later: the engine parks the client (holding its
+ * further input) until the host calls uircd_auth_complete(). The pass pointer
+ * is valid only for the duration of this call; a host that defers must copy
+ * what it needs before returning. At most one auth is in flight per client.
  */
-typedef int (*uircd_auth_cb)(void *ud, enum uircd_auth_kind kind,
+typedef int (*uircd_auth_cb)(void *ud, void *conn, enum uircd_auth_kind kind,
                              const char *name, const char *pass);
 
 /** Optional notification hook for logging and admin visibility.
@@ -164,6 +177,20 @@ int uircd_recv(struct uircd *s, struct uircd_client *c,
  *  finished the drop() it was asked to perform). Destroys the client. Safe to
  *  call exactly once per client; never after uircd_recv() returned UIRCD_ERR. */
 void uircd_closed(struct uircd *s, struct uircd_client *c);
+
+/** Deliver a deferred authentication verdict.
+ *
+ * The host calls this once for a client whose auth callback returned
+ * UIRCD_AUTH_PENDING, with ok nonzero to accept or zero to reject. The engine
+ * resumes exactly as if the callback had returned that verdict synchronously
+ * (completing registration or emitting the failure) and then processes any
+ * input it held while the verdict was outstanding.
+ *
+ * It is a no-op if the client is not currently awaiting a deferred verdict.
+ * The host must not call it after uircd_closed() for that client: once a peer
+ * is gone the pending verdict is simply dropped.
+ */
+void uircd_auth_complete(struct uircd *s, struct uircd_client *c, int ok);
 
 /** Periodic maintenance: PING idle clients and drop ping-timeouts.
  *  Call roughly once per second with a monotonic millisecond clock. */

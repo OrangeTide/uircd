@@ -35,9 +35,10 @@ h_drop(void *ud, void *conn)
 }
 
 static int
-h_auth(void *ud, enum uircd_auth_kind kind, const char *name, const char *pass)
+h_auth(void *ud, void *conn, enum uircd_auth_kind kind, const char *name,
+       const char *pass)
 {
-    (void)ud; (void)name; (void)pass;
+    (void)ud; (void)conn; (void)name; (void)pass;
     return kind == UIRCD_AUTH_OPER ? UIRCD_OK : UIRCD_ERR;
 }
 

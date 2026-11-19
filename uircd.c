@@ -100,6 +100,12 @@ struct uircd_client {
     int got_nick, got_user;
     int authed;             /* passed user auth (or none required) */
 
+    int auth_pending;       /* a deferred auth verdict is outstanding */
+    enum uircd_auth_kind auth_kind; /* which credential is pending */
+    char auth_acct[ACCT_MAX + 1];   /* account name to set on a USER accept */
+    char *hold;             /* input received while the verdict is pending */
+    size_t hold_len, hold_cap;
+
     char nick[NICK_MAX + 1];
     char user[USER_MAX + 1];
     char real[REAL_MAX + 1];
@@ -660,6 +666,7 @@ client_free(struct uircd *s, struct uircd_client *c)
             break;
         }
     }
+    free(c->hold);
     free(c);
 }
 
@@ -873,6 +880,15 @@ cmd_user(struct uircd *s, struct uircd_client *c, struct msg *m)
     return try_register(s, c);
 }
 
+static void
+grant_oper(struct uircd *s, struct uircd_client *c)
+{
+    c->umodes |= UMODE_OPER;
+    numeric(s, c, 381, ":You are now an IRC operator");
+    sendf(s, c, ":%s MODE %s :+o", srv_name(s), c->nick);
+    logevt(s, "oper", c->nick);
+}
+
 static int
 cmd_pass(struct uircd *s, struct uircd_client *c, struct msg *m)
 {
@@ -883,6 +899,8 @@ cmd_pass(struct uircd *s, struct uircd_client *c, struct msg *m)
         numeric(s, c, 462, ":You may not reregister");
         return 0;
     }
+    if (c->auth_pending)
+        return 0; /* one auth in flight per client; ignore until it resolves */
     if (need_params(s, c, m, 1))
         return 0;
     secret = m->argv[0];
@@ -892,14 +910,27 @@ cmd_pass(struct uircd *s, struct uircd_client *c, struct msg *m)
         name = m->argv[0];
         secret = colon + 1;
     }
-    if (s->cfg.auth && s->cfg.auth(s->cfg.ud, UIRCD_AUTH_USER, name, secret)
-            == UIRCD_OK) {
-        c->authed = 1;
-        if (name)
-            copy_str(c->acct, sizeof(c->acct), name);
-    } else if (s->cfg.require_login) {
-        numeric(s, c, 464, ":Password incorrect");
+    if (s->cfg.auth) {
+        int rc = s->cfg.auth(s->cfg.ud, c->host_conn, UIRCD_AUTH_USER,
+                             name, secret);
+        if (rc == UIRCD_OK) {
+            c->authed = 1;
+            if (name)
+                copy_str(c->acct, sizeof(c->acct), name);
+            return 0;
+        }
+        if (rc == UIRCD_AUTH_PENDING) {
+            c->auth_pending = 1;
+            c->auth_kind = UIRCD_AUTH_USER;
+            if (name)
+                copy_str(c->auth_acct, sizeof(c->auth_acct), name);
+            else
+                c->auth_acct[0] = '\0';
+            return 0;
+        }
     }
+    if (s->cfg.require_login)
+        numeric(s, c, 464, ":Password incorrect");
     return 0;
 }
 
@@ -908,16 +939,22 @@ cmd_oper(struct uircd *s, struct uircd_client *c, struct msg *m)
 {
     if (need_params(s, c, m, 2))
         return 0;
-    if (!s->cfg.auth ||
-        s->cfg.auth(s->cfg.ud, UIRCD_AUTH_OPER, m->argv[0], m->argv[1])
-            != UIRCD_OK) {
-        numeric(s, c, 491, ":No O-lines for your host");
-        return 0;
+    if (c->auth_pending)
+        return 0; /* one auth in flight per client */
+    if (s->cfg.auth) {
+        int rc = s->cfg.auth(s->cfg.ud, c->host_conn, UIRCD_AUTH_OPER,
+                             m->argv[0], m->argv[1]);
+        if (rc == UIRCD_AUTH_PENDING) {
+            c->auth_pending = 1;
+            c->auth_kind = UIRCD_AUTH_OPER;
+            return 0;
+        }
+        if (rc == UIRCD_OK) {
+            grant_oper(s, c);
+            return 0;
+        }
     }
-    c->umodes |= UMODE_OPER;
-    numeric(s, c, 381, ":You are now an IRC operator");
-    sendf(s, c, ":%s MODE %s :+o", srv_name(s), c->nick);
-    logevt(s, "oper", c->nick);
+    numeric(s, c, 491, ":No O-lines for your host");
     return 0;
 }
 
@@ -1876,14 +1913,42 @@ uircd_accept(struct uircd *s, void *host_conn, const char *peer_ip)
     return c;
 }
 
-int
-uircd_recv(struct uircd *s, struct uircd_client *c, const void *data,
+/* Buffer input that arrives while a deferred auth verdict is outstanding, to be
+ * replayed by uircd_auth_complete(). Bounded so a flood during the auth window
+ * cannot grow memory without limit. Returns 0, or -1 if the cap is exceeded. */
+#define HOLD_MAX 4096
+
+static int
+hold_append(struct uircd_client *c, const unsigned char *data, size_t len)
+{
+    if (len == 0)
+        return 0;
+    if (c->hold_len + len > HOLD_MAX)
+        return -1;
+    if (c->hold_len + len > c->hold_cap) {
+        size_t nc = c->hold_cap ? c->hold_cap : 512;
+        char *p;
+        while (nc < c->hold_len + len)
+            nc *= 2;
+        p = realloc(c->hold, nc);
+        if (!p)
+            return -1;
+        c->hold = p;
+        c->hold_cap = nc;
+    }
+    memcpy(c->hold + c->hold_len, data, len);
+    c->hold_len += len;
+    return 0;
+}
+
+/* Parse and dispatch a run of received bytes. Returns UIRCD_ERR if the client
+ * was destroyed, else UIRCD_OK. If a command defers authentication mid-run, the
+ * remaining bytes are held and processing stops until the verdict arrives. */
+static int
+feed_bytes(struct uircd *s, struct uircd_client *c, const unsigned char *p,
            size_t len)
 {
-    const unsigned char *p = data;
     size_t i;
-
-    c->active = 1; /* tick() converts this to a fresh last_active_ms */
 
     for (i = 0; i < len; i++) {
         unsigned char b = p[i];
@@ -1915,6 +1980,15 @@ uircd_recv(struct uircd *s, struct uircd_client *c, const void *data,
                 continue;
             if (dispatch(s, c, line))
                 return UIRCD_ERR;
+            if (c->auth_pending) {
+                /* Hold the rest of this buffer until the verdict arrives. */
+                if (hold_append(c, p + i + 1, len - (i + 1)) < 0) {
+                    sendf(s, c, "ERROR :Input flood during authentication");
+                    client_quit(s, c, "Input flood during authentication");
+                    return UIRCD_ERR;
+                }
+                return UIRCD_OK;
+            }
         } else if (c->inlen < INBUF_MAX) {
             c->inbuf[c->inlen++] = (char)b;
         } else {
@@ -1924,6 +1998,62 @@ uircd_recv(struct uircd *s, struct uircd_client *c, const void *data,
         }
     }
     return UIRCD_OK;
+}
+
+int
+uircd_recv(struct uircd *s, struct uircd_client *c, const void *data,
+           size_t len)
+{
+    c->active = 1; /* tick() converts this to a fresh last_active_ms */
+
+    if (c->auth_pending) {
+        if (hold_append(c, data, len) < 0) {
+            sendf(s, c, "ERROR :Input flood during authentication");
+            client_quit(s, c, "Input flood during authentication");
+            return UIRCD_ERR;
+        }
+        return UIRCD_OK;
+    }
+    return feed_bytes(s, c, data, len);
+}
+
+void
+uircd_auth_complete(struct uircd *s, struct uircd_client *c, int ok)
+{
+    char *held;
+    size_t heldlen;
+
+    if (!c || c->dead || !c->auth_pending)
+        return;
+    c->auth_pending = 0;
+
+    if (c->auth_kind == UIRCD_AUTH_OPER) {
+        if (ok)
+            grant_oper(s, c);
+        else
+            numeric(s, c, 491, ":No O-lines for your host");
+    } else {
+        if (ok) {
+            c->authed = 1;
+            if (c->auth_acct[0])
+                copy_str(c->acct, sizeof(c->acct), c->auth_acct);
+        } else if (s->cfg.require_login) {
+            numeric(s, c, 464, ":Password incorrect");
+        }
+    }
+    c->auth_acct[0] = '\0';
+
+    /* Replay input held while the verdict was outstanding. Detach the buffer
+     * first so a command that defers again during the replay can refill it. A
+     * held NICK/USER completes registration through the normal path. */
+    held = c->hold;
+    heldlen = c->hold_len;
+    c->hold = NULL;
+    c->hold_len = c->hold_cap = 0;
+    if (held) {
+        feed_bytes(s, c, (const unsigned char *)held, heldlen);
+        free(held);
+    }
 }
 
 void
