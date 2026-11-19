@@ -79,3 +79,63 @@ build fetches anything it does not verify.
 - The build toolchain itself (compiler, libc, OpenSSL, pthreads) is the host's,
   not vendored, and its provenance is the operator's responsibility, noted here
   but not enforced.
+
+## Round 2 (2026-11-19)
+
+Closed round 1's residual by re-vendoring: cloned the upstream repositories and
+diffed the subset to a named release, which both pinned the provenance and
+surfaced a security regression the vendoring had introduced.
+
+### Observed
+
+- Tarsnap's scrypt bundles libcperciva inside its own tree
+  (`scrypt/libcperciva/...`), so one scrypt release fixes all seven files.
+  Diffing the subset against each release tag, it matches **1.2.0**: four files
+  (crypto_scrypt.h, crypto_scrypt_smix.h, sha256.h, sysendian.h) are byte-identical
+  to 1.2.0, and the other three differ only by the documented standalone-build
+  edits. The subset predates upstream HEAD, which added hardware-accelerated
+  SHA-256 and a `void*`/`size_t` smix refactor the vendored code does not have.
+- The 1.2.0 diff showed the local changes precisely, contradicting the old
+  "Local changes: none" note: `crypto_scrypt.c` stubs out the Tarsnap build
+  includes (`scrypt_platform.h`, `cpusupport.h`, `warnp.h`,
+  `crypto_scrypt_smix_sse2.h`), adds `<stdio.h>`, and turns two `warn0(...)` into
+  `fprintf(stderr, ...)`; `crypto_scrypt_smix.c` drops a `sha256.h` include; and
+  `sha256.c` dropped `insecure_memzero.h` and replaced every `insecure_memzero`
+  with plain `bzero`. VENDORED.md now pins 1.2.0, lists each file's upstream path,
+  records the diffs, and carries an updated content hash.
+
+### Judged
+
+#### 2. Secret scrubbing was subject to dead-store elimination  [H-017]
+
+- **Claim:** upstream's `insecure_memzero` is implemented to defeat the
+  compiler's dead-store elimination; the vendoring replaced it in `sha256.c`
+  with plain `bzero` over the SHA-256/HMAC internal buffers (`W`, `S`, `t0`,
+  `t1`, `khash`, `pad`, `ihash`, the context), which are local and not read after
+  the wipe. At `-O2` the compiler is free to remove such a store, so the
+  password-derived hashing state may linger in memory. The host's own wipes had
+  the same shape: `example/auth.c` zeroed the password copy and derived hash with
+  `memset`, and `tools/uircdpasswd.c` zeroed the password and hash with `memset`.
+- **Lines:** `third_party/scrypt/sha256.c` (the `bzero` sites); `example/auth.c`
+  `auth_compute` (the two `memset` wipes); `tools/uircdpasswd.c` (the two `memset`
+  wipes).
+- **Scenario:** after a login attempt, a core dump, freed-heap reuse, or other
+  memory disclosure exposes stack or heap that a dropped wipe left holding
+  password-derived material.
+- **Falsifier:** the sensitive buffers are zeroed with a primitive the optimizer
+  does not elide. Satisfied by switching all these sites to `explicit_bzero`
+  (available via `-D_GNU_SOURCE` on this target), which is defined to resist DSE.
+  The hash is unchanged: a good login still returns 001 and a bad one 464, run
+  this round, and `make check` and the optimized build pass. A plain
+  `memset`/`bzero` at `-O2` carries no such guarantee.
+- **Fix shape:** use `explicit_bzero` for every secret wipe. **Fixed** this round.
+  The vendored `sha256.c` edit restores the exact property upstream's
+  `insecure_memzero` provided; it is recorded in VENDORED.md as a HARDEN local
+  change on top of 1.2.0.
+
+### Not checked this round
+
+- Whether any specific compiler/version actually elided the pre-fix wipes was not
+  disassembled; the fix removes the dependence on that, which is the point.
+- The host's broader memory hygiene (other transient copies of credentials in the
+  engine or TLS buffers) was not swept; this round covered the named wipe sites.

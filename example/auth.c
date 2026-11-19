@@ -184,9 +184,11 @@ auth_compute(struct auth_job *j)
                       out, sizeof(out)) == 0)
         ok = ct_equal(out, j->hash, HASH_LEN);
 
-    /* wipe sensitive material regardless of the outcome */
-    memset(j->pass, 0, sizeof(j->pass));
-    memset(out, 0, sizeof(out));
+    /* wipe sensitive material regardless of the outcome; explicit_bzero
+     * resists the dead-store elimination that -O2 may apply to a plain
+     * memset on a buffer that is not read again */
+    explicit_bzero(j->pass, sizeof(j->pass));
+    explicit_bzero(out, sizeof(out));
     return ok;
 }
 

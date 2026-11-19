@@ -96,8 +96,8 @@ main(int argc, char **argv)
     printf("%s:scrypt:%d:%d:%d:%s:%s:%s\n",
            name, SCRYPT_N, SCRYPT_R, SCRYPT_P, saltb64, hashb64, flags);
 
-    /* wipe sensitive material */
-    memset(pass, 0, sizeof(pass));
-    memset(hash, 0, sizeof(hash));
+    /* wipe sensitive material; explicit_bzero is not elided at -O2 */
+    explicit_bzero(pass, sizeof(pass));
+    explicit_bzero(hash, sizeof(hash));
     return 0;
 }
