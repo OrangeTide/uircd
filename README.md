@@ -115,6 +115,26 @@ The library's `uircd_auth_cb` supports this through the `UIRCD_AUTH_PENDING`
 verdict and `uircd_auth_complete()`; a host that returns only `UIRCD_OK`/`UIRCD_ERR`
 is still verified synchronously.
 
+Size `[auth] kdf-threads` to the number of logins you expect to be verified at
+once. Each scrypt verification holds one pool thread for its full cost (tens of
+milliseconds at the default work factors), so the pool verifies at most
+`kdf-threads` logins per that interval. When concurrent logins exceed that rate
+the pool's queue backs up, the per-attempt deadline timer re-arms in short steps
+until a result is ready, and logins that cannot be answered within the retry
+window are failed closed rather than left hanging. This is deliberate flood
+protection, but it also slows every login during the burst. Two settings trade
+off against it: more `kdf-threads` raises the steady verification rate (bounded
+by available cores, since scrypt is CPU-bound), and a larger `auth-deadline-ms`
+widens the window before a queued login is failed closed. A useful starting
+point is one thread per core you are willing to spend on login verification,
+with the deadline left at its default unless the slowest configured scrypt needs
+more. Under-provisioning does not corrupt state or leak a wrong verdict; it only
+raises login latency and, past deep saturation, rejects logins that time out.
+The timing-equalization property degrades gracefully under this saturation: the
+known-bad and unknown paths slow together, so the gap stays small until the pool
+is heavily overloaded (see finding H-014 in `HARDEN.md`), and provisioning
+`kdf-threads` for the expected concurrent-login rate keeps it closed.
+
 ## Administrative commands
 
 An operator (`OPER name pass`) gains these, in addition to `KILL`:
