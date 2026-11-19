@@ -119,6 +119,7 @@ struct uircd_client {
     char inbuf[INBUF_MAX];
     size_t inlen;
     int skipping;           /* discarding an over-long line */
+    int scrub_line;         /* last dispatched line held a credential; wipe it */
 
     uint64_t connect_ms;    /* first tick seen; 0 until then */
     uint64_t last_active_ms;
@@ -332,6 +333,19 @@ numeric(struct uircd *s, struct uircd_client *c, int code, const char *fmt, ...)
         va_end(ap);
     }
     sendf(s, c, ":%s %03d %s %s", srv_name(s), code, cli_target(c), tail);
+}
+
+/* Zero memory so the compiler does not elide the write as a dead store (as it
+ * may for a plain memset on a buffer that is not read again). Kept self
+ * contained so the library stays portable; the host example uses explicit_bzero
+ * where _GNU_SOURCE provides it. */
+static void
+secure_wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = p;
+
+    while (n--)
+        *v++ = 0;
 }
 
 static void
@@ -666,7 +680,13 @@ client_free(struct uircd *s, struct uircd_client *c)
             break;
         }
     }
+    /* The client struct and its hold buffer may still hold plaintext
+     * credential bytes (a connection closed mid-authentication); wipe both
+     * before freeing so they do not linger on the heap. */
+    if (c->hold)
+        secure_wipe(c->hold, c->hold_cap);
     free(c->hold);
+    secure_wipe(c, sizeof(*c));
     free(c);
 }
 
@@ -895,6 +915,7 @@ cmd_pass(struct uircd *s, struct uircd_client *c, struct msg *m)
     char *colon;
     const char *name = NULL, *secret;
 
+    c->scrub_line = 1; /* this line carries a password; wipe it after dispatch */
     if (c->registered) {
         numeric(s, c, 462, ":You may not reregister");
         return 0;
@@ -937,6 +958,7 @@ cmd_pass(struct uircd *s, struct uircd_client *c, struct msg *m)
 static int
 cmd_oper(struct uircd *s, struct uircd_client *c, struct msg *m)
 {
+    c->scrub_line = 1; /* this line carries a password; wipe it after dispatch */
     if (need_params(s, c, m, 2))
         return 0;
     if (c->auth_pending)
@@ -1971,6 +1993,7 @@ feed_bytes(struct uircd *s, struct uircd_client *c, const unsigned char *p,
             /* simple flood accounting */
             c->flood_count++;
             if (c->flood_count > s->flood_lines) {
+                secure_wipe(line, sizeof(line));
                 sendf(s, c, "ERROR :Excess flood");
                 client_quit(s, c, "Excess flood");
                 return UIRCD_ERR;
@@ -1978,8 +2001,18 @@ feed_bytes(struct uircd *s, struct uircd_client *c, const unsigned char *p,
 
             if (llen == 0)
                 continue;
-            if (dispatch(s, c, line))
+            if (dispatch(s, c, line)) {
+                secure_wipe(line, sizeof(line));
                 return UIRCD_ERR;
+            }
+            /* A PASS/OPER line leaves the plaintext password in this stack
+             * buffer and in c->inbuf; wipe both so it does not linger in
+             * memory after the credential has been handled. */
+            if (c->scrub_line) {
+                secure_wipe(line, sizeof(line));
+                secure_wipe(c->inbuf, sizeof(c->inbuf));
+                c->scrub_line = 0;
+            }
             if (c->auth_pending) {
                 /* Hold the rest of this buffer until the verdict arrives. */
                 if (hold_append(c, p + i + 1, len - (i + 1)) < 0) {
@@ -2052,6 +2085,8 @@ uircd_auth_complete(struct uircd *s, struct uircd_client *c, int ok)
     c->hold_len = c->hold_cap = 0;
     if (held) {
         feed_bytes(s, c, (const unsigned char *)held, heldlen);
+        /* held input may have carried a pipelined credential; wipe before free */
+        secure_wipe(held, heldlen);
         free(held);
     }
 }

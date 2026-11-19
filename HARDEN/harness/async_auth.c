@@ -12,7 +12,9 @@
  *      cleanly (no leak, no use-after-free);
  *   D. closing a client while its verdict is still pending frees it, hold
  *      buffer and all, without a completion call;
- *   E. a deferred OPER verdict grants operator on accept.
+ *   E. a deferred OPER verdict grants operator on accept;
+ *   F. after a PASS is handled the plaintext password is wiped from the
+ *      engine's input buffer, not left to linger (H-018).
  *
  * Under AddressSanitizer + UndefinedBehaviorSanitizer any leak of the hold
  * buffer or use-after-free aborts; a correct engine prints "survived".
@@ -208,6 +210,31 @@ scenario_oper(void)
     uircd_free(s);
 }
 
+/* F: after a PASS is handled, the plaintext password does not linger in the
+ * engine's input buffer (H-018). */
+static void
+scenario_scrub(void)
+{
+    struct uircd *s = new_srv(0);
+    struct uircd_client *c;
+    static const char sentinel[] = "Zq7sentinelPWq7Z";
+
+    g_mode = SYNC_OK; /* PASS accepts immediately; the client stays alive */
+    c = uircd_accept(s, (void *)"F", "203.0.113.6");
+    if (!c) fail("F: accept");
+
+    feed(s, c, "PASS acct:Zq7sentinelPWq7Z\r\n");
+    if (!c->authed) fail("F: PASS not accepted");
+
+    /* The raw line sat in c->inbuf; the scrub must have zeroed it. On an engine
+     * that does not wipe, the sentinel is still present and this aborts. */
+    if (memmem(c->inbuf, sizeof(c->inbuf), sentinel, strlen(sentinel)) != NULL)
+        fail("F: plaintext password still in c->inbuf after PASS");
+
+    uircd_closed(s, c);
+    uircd_free(s);
+}
+
 int
 main(void)
 {
@@ -216,6 +243,7 @@ main(void)
     scenario_overflow();
     scenario_close_pending();
     scenario_oper();
+    scenario_scrub();
     printf("survived\n");
     return 0;
 }

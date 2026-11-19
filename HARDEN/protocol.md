@@ -103,3 +103,58 @@ connected client, and for the oper-gated commands, an authenticated operator.
   `other` is removed and `keep` stays. Prints `survived`. Discriminates: before
   the fix the ban removed `keep`, so the assertions abort.
 - **State:** **FIXED.**
+
+## Round 3 (2026-11-19)
+
+Following the secret-scrubbing work in H-017 (the vendored KDF and the host's
+password copies), this round looked at where the engine itself holds a plaintext
+credential.
+
+### Observed
+
+- `cmd_pass` and `cmd_oper` parse the password out of the dispatched line
+  (`m->argv[]` points into the `line[]` buffer that `feed_bytes` built from
+  `c->inbuf`). After the command is handled, neither `line[]` (stack) nor
+  `c->inbuf` (per-client, lives for the whole connection) was cleared, so the
+  plaintext password lingered in both. The `hold` buffer can also carry a
+  pipelined credential replayed after a deferred verdict.
+
+### Judged
+
+#### 5. The engine left a plaintext password in its input buffers  [H-018]
+
+- **Claim:** a `PASS acct:secret` (or `OPER name secret`) line leaves the
+  plaintext password in the stack `line[]` and in the persistent `c->inbuf`,
+  which is not wiped when the line is consumed (`c->inlen` is reset to 0 but the
+  bytes remain). The password then sits in engine memory for the life of the
+  connection, available to a later memory disclosure (core dump, freed-heap
+  reuse). This is the same defense-in-depth class as H-017, for the plaintext
+  rather than the derived hash state, and the plaintext is the more sensitive of
+  the two.
+- **Lines:** uircd.c `cmd_pass`, `cmd_oper` (parse the secret from `line[]`);
+  `feed_bytes` (builds `line` from `c->inbuf`, resets `inlen` without wiping);
+  `uircd_auth_complete`, `client_free` (free the hold buffer and the client).
+- **Scenario:** a login happens, then a core dump or heap disclosure exposes
+  engine memory still holding the plaintext password.
+- **Falsifier:** `HARDEN/harness/async_auth.c` scenario F, built and run under
+  ASan+UBSan this round. It feeds `PASS acct:<sentinel>` and asserts the sentinel
+  is absent from `c->inbuf` afterward. Prints `survived`. Discriminates: with the
+  scrub disabled the sentinel is still present and the assertion aborts (verified
+  by building the harness against a no-scrub `uircd.c`: `FAIL: plaintext password
+  still in c->inbuf`).
+- **Fix shape:** a `scrub_line` flag set by `cmd_pass`/`cmd_oper`; `feed_bytes`
+  wipes `line[]` and `c->inbuf` with a non-elidable `secure_wipe` after a flagged
+  line (and on the error returns that can carry a credential), and the hold
+  buffer and the whole client struct are wiped before they are freed.
+  `secure_wipe` is a self-contained volatile-pointer zero, so the portable
+  library gains no `_GNU_SOURCE`/`explicit_bzero` dependency. **FIXED.** The hash
+  path is untouched: good and bad logins still verify, and `make check` passes.
+
+### Not checked this round
+
+- Copies of the plaintext outside the engine (the kernel socket buffer, OpenSSL's
+  decrypt buffer, the host's own recv buffer passed into `uircd_recv`) are not
+  reachable from the engine and are not wiped; the scrub covers the engine's own
+  copies only, so the mitigation is partial by nature.
+- No disassembly to confirm a given compiler would have kept the plaintext; the
+  `secure_wipe` write is non-elidable by construction, which removes the question.
