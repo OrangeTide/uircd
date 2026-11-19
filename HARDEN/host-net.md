@@ -278,5 +278,6 @@ miniircd handles the SSL error returns and the handshake lifetime.
 
 - No TLS renegotiation or fragmentation-specific fuzzing beyond the patterns
   above; OpenSSL remains the trusted record-layer parser.
-- `HANDSHAKE_TIMEOUT_MS` is a fixed 10s, not configurable; adequate for the
-  default deployment but not tunable from the command line.
+- `HANDSHAKE_TIMEOUT_MS` is the default 10s. (Made configurable afterward via
+  the `-H` flag and the `[tls] handshake-timeout` config key; not a security
+  change, so no new ledger row.)

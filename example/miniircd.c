@@ -26,6 +26,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -41,7 +42,10 @@
 #define MAX_OUTBUF   (1u << 20)   /* 1 MiB per-connection output cap */
 #define READ_CHUNK   8192
 #define TICK_MS      1000
-#define HANDSHAKE_TIMEOUT_MS 10000 /* reclaim a TLS handshake stalled this long */
+#define DEF_HANDSHAKE_TIMEOUT_MS 10000 /* reclaim a stalled TLS handshake */
+
+/* Host-side TLS handshake deadline, configurable (see load_config). */
+static unsigned g_handshake_timeout_ms = DEF_HANDSHAKE_TIMEOUT_MS;
 
 struct worker;
 
@@ -584,7 +588,7 @@ on_tick(struct iox_loop *loop, void *arg)
      * Each worker sweeps only its own conns, which it alone may free. */
     for (c = w->conns; c; c = next) {
         next = c->next; /* close_conn unlinks c */
-        if (c->handshaking && now - c->hs_start_ms >= HANDSHAKE_TIMEOUT_MS)
+        if (c->handshaking && now - c->hs_start_ms >= g_handshake_timeout_ms)
             close_conn(c);
     }
     pthread_mutex_unlock(&g_lock);
@@ -720,11 +724,176 @@ read_file(const char *path)
     return buf;
 }
 
+/****************************************************************
+ * Configuration
+ *
+ * The uircd library takes its settings as a struct (uircd_config); that is its
+ * settings API. This host adds its own settings (TLS, threads, the handshake
+ * deadline) and wires both to a gitconfig-style file, so the config format
+ * lives in the host, not the library. Command-line flags override the file.
+ ****************************************************************/
+
+struct hostconf {
+    int port, use6, nthreads, daemon, require_login;
+    char *cert, *key, *passwd, *srvname, *network, *motd_path;
+
+    /* seconds / counts; 0 means "leave the default". */
+    unsigned handshake_timeout_s;   /* host */
+    unsigned max_per_ip, reg_timeout_s;             /* engine */
+    unsigned max_clients, max_channels;             /* engine */
+    unsigned ping_interval_s, ping_timeout_s;       /* engine */
+    unsigned flood_lines, flood_window_s;           /* engine */
+};
+
+static void
+hostconf_defaults(struct hostconf *hc)
+{
+    memset(hc, 0, sizeof(*hc));
+    hc->port = 6667;
+    hc->srvname = strdup("irc.local");
+    hc->network = strdup("uircd");
+}
+
+static void
+hostconf_free(struct hostconf *hc)
+{
+    free(hc->cert);
+    free(hc->key);
+    free(hc->passwd);
+    free(hc->srvname);
+    free(hc->network);
+    free(hc->motd_path);
+}
+
+static int
+set_str(char **dst, const char *val)
+{
+    char *dup = strdup(val);
+    if (!dup)
+        return -1;
+    free(*dst);
+    *dst = dup;
+    return 0;
+}
+
+static int
+parse_bool(const char *v)
+{
+    return (!strcasecmp(v, "true") || !strcasecmp(v, "yes") ||
+            !strcasecmp(v, "on") || !strcmp(v, "1"));
+}
+
+/* Apply one "section.name = value" setting. Returns 0, or -1 for an unknown
+ * key or a bad value. */
+static int
+hostconf_set(struct hostconf *hc, const char *sec, const char *name,
+             const char *val)
+{
+#define MATCH(s, n) (!strcmp(sec, (s)) && !strcmp(name, (n)))
+    if (MATCH("server", "name"))    return set_str(&hc->srvname, val);
+    if (MATCH("server", "network")) return set_str(&hc->network, val);
+    if (MATCH("server", "motd"))    return set_str(&hc->motd_path, val);
+    if (MATCH("listen", "port"))    { hc->port = atoi(val); return 0; }
+    if (MATCH("listen", "ipv6"))    { hc->use6 = parse_bool(val); return 0; }
+    if (MATCH("tls", "cert"))       return set_str(&hc->cert, val);
+    if (MATCH("tls", "key"))        return set_str(&hc->key, val);
+    if (MATCH("tls", "handshake-timeout"))
+        { hc->handshake_timeout_s = (unsigned)atoi(val); return 0; }
+    if (MATCH("auth", "passwd"))    return set_str(&hc->passwd, val);
+    if (MATCH("auth", "require-login"))
+        { hc->require_login = parse_bool(val); return 0; }
+    if (MATCH("limits", "threads")) { hc->nthreads = atoi(val); return 0; }
+    if (MATCH("limits", "max-per-ip"))
+        { hc->max_per_ip = (unsigned)atoi(val); return 0; }
+    if (MATCH("limits", "reg-timeout"))
+        { hc->reg_timeout_s = (unsigned)atoi(val); return 0; }
+    if (MATCH("limits", "max-clients"))
+        { hc->max_clients = (unsigned)atoi(val); return 0; }
+    if (MATCH("limits", "max-channels"))
+        { hc->max_channels = (unsigned)atoi(val); return 0; }
+    if (MATCH("limits", "ping-interval"))
+        { hc->ping_interval_s = (unsigned)atoi(val); return 0; }
+    if (MATCH("limits", "ping-timeout"))
+        { hc->ping_timeout_s = (unsigned)atoi(val); return 0; }
+    if (MATCH("limits", "flood-lines"))
+        { hc->flood_lines = (unsigned)atoi(val); return 0; }
+    if (MATCH("limits", "flood-window"))
+        { hc->flood_window_s = (unsigned)atoi(val); return 0; }
+#undef MATCH
+    return -1;
+}
+
+static char *
+trim(char *s)
+{
+    char *e;
+    while (*s && isspace((unsigned char)*s))
+        s++;
+    e = s + strlen(s);
+    while (e > s && isspace((unsigned char)e[-1]))
+        *--e = '\0';
+    return s;
+}
+
+/* Read a gitconfig-style file: "[section]" headers, "key = value" lines, and
+ * '#'/';' comments. Returns 0, or -1 if the file cannot be read or any line is
+ * malformed or names an unknown setting (those are reported, parsing goes on). */
+static int
+load_config(const char *path, struct hostconf *hc)
+{
+    char *text = read_file(path);
+    char section[64] = "";
+    char *line, *save;
+    int lineno = 0, rc = 0;
+
+    if (!text) {
+        fprintf(stderr, "config: cannot read %s\n", path);
+        return -1;
+    }
+    for (line = strtok_r(text, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *s = trim(line);
+        char *eq, *key, *val;
+        lineno++;
+        if (*s == '\0' || *s == '#' || *s == ';')
+            continue;
+        if (*s == '[') {
+            char *close = strchr(s, ']');
+            if (!close) {
+                fprintf(stderr, "config %s:%d: missing ']'\n", path, lineno);
+                rc = -1;
+                continue;
+            }
+            *close = '\0';
+            snprintf(section, sizeof(section), "%s", trim(s + 1));
+            continue;
+        }
+        eq = strchr(s, '=');
+        if (!eq) {
+            fprintf(stderr, "config %s:%d: expected 'key = value'\n",
+                    path, lineno);
+            rc = -1;
+            continue;
+        }
+        *eq = '\0';
+        key = trim(s);
+        val = trim(eq + 1);
+        if (hostconf_set(hc, section, key, val) != 0) {
+            fprintf(stderr, "config %s:%d: unknown setting '%s.%s'\n",
+                    path, lineno, section, key);
+            rc = -1;
+        }
+    }
+    free(text);
+    return rc;
+}
+
 static void
 usage(const char *prog)
 {
     fprintf(stderr,
         "usage: %s [options]\n"
+        "  -f FILE      read a gitconfig-style config file (see miniircd.conf)\n"
         "  -p PORT      listen port (default 6667)\n"
         "  -6           bind IPv6 (dual-stack)\n"
         "  -t N         worker threads (default: online CPUs)\n"
@@ -738,99 +907,169 @@ usage(const char *prog)
         "  -P N         max connections per source IP (default 8)\n"
         "  -R SEC       drop unregistered sessions after SEC seconds"
         " (default 30)\n"
+        "  -H SEC       TLS handshake deadline in seconds (default 10)\n"
         "  -d           daemonize (background)\n"
-        "  -h           this help\n",
+        "  -h           this help\n"
+        "Command-line options override settings from -f.\n",
         prog);
+}
+
+/* Apply one command-line override to the host config. */
+static int
+apply_opt(struct hostconf *hc, int opt, const char *arg)
+{
+    switch (opt) {
+    case 'p': hc->port = atoi(arg); break;
+    case '6': hc->use6 = 1; break;
+    case 't': hc->nthreads = atoi(arg); break;
+    case 'c': if (set_str(&hc->cert, arg)) return -1; break;
+    case 'k': if (set_str(&hc->key, arg)) return -1; break;
+    case 'A': if (set_str(&hc->passwd, arg)) return -1; break;
+    case 'L': hc->require_login = 1; break;
+    case 'n': if (set_str(&hc->srvname, arg)) return -1; break;
+    case 'N': if (set_str(&hc->network, arg)) return -1; break;
+    case 'm': if (set_str(&hc->motd_path, arg)) return -1; break;
+    case 'P': hc->max_per_ip = (unsigned)atoi(arg); break;
+    case 'R': hc->reg_timeout_s = (unsigned)atoi(arg); break;
+    case 'H': hc->handshake_timeout_s = (unsigned)atoi(arg); break;
+    case 'd': hc->daemon = 1; break;
+    default: return -1;
+    }
+    return 0;
 }
 
 int
 main(int argc, char **argv)
 {
+    static const char *optstr = "f:p:6t:c:k:A:Ln:N:m:P:R:H:dh";
     struct uircd_config cfg;
-    int port = 6667, use6 = 0, nthreads = 0, require_login = 0;
-    int max_per_ip = 0, reg_timeout_s = 0;
-    const char *cert = NULL, *key = NULL, *passwd = NULL;
-    const char *srvname = "irc.local", *network = "uircd";
+    struct hostconf hc;
+    const char *cfgpath = NULL;
     char *motd = NULL;
     sigset_t block, old;
     int sig, i, opt;
 
-    memset(&cfg, 0, sizeof(cfg));
+    hostconf_defaults(&hc);
 
-    while ((opt = getopt(argc, argv, "p:6t:c:k:A:Ln:N:m:P:R:dh")) != -1) {
-        switch (opt) {
-        case 'p': port = atoi(optarg); break;
-        case '6': use6 = 1; break;
-        case 't': nthreads = atoi(optarg); break;
-        case 'c': cert = optarg; break;
-        case 'k': key = optarg; break;
-        case 'A': passwd = optarg; break;
-        case 'L': require_login = 1; break;
-        case 'n': srvname = optarg; break;
-        case 'N': network = optarg; break;
-        case 'm': motd = read_file(optarg); break;
-        case 'P': max_per_ip = atoi(optarg); break;
-        case 'R': reg_timeout_s = atoi(optarg); break;
-        case 'd': g_daemon = 1; break;
-        case 'h': usage(argv[0]); return 0;
-        default: usage(argv[0]); return 2;
+    /* First pass: find -f (and -h) before loading the file, with getopt's own
+     * error messages suppressed so unknown options are reported once, below. */
+    opterr = 0;
+    while ((opt = getopt(argc, argv, optstr)) != -1) {
+        if (opt == 'f')
+            cfgpath = optarg;
+        else if (opt == 'h') {
+            usage(argv[0]);
+            hostconf_free(&hc);
+            return 0;
         }
     }
-    if (port <= 0 || port > 65535) {
+    if (cfgpath && load_config(cfgpath, &hc) != 0) {
+        hostconf_free(&hc);
+        return 2;
+    }
+
+    /* Second pass: command-line options override the file. */
+    opterr = 1;
+    optind = 1;
+    while ((opt = getopt(argc, argv, optstr)) != -1) {
+        if (opt == 'f')
+            continue;
+        if (opt == 'h') {
+            usage(argv[0]);
+            hostconf_free(&hc);
+            return 0;
+        }
+        if (apply_opt(&hc, opt, optarg) != 0) {
+            usage(argv[0]);
+            hostconf_free(&hc);
+            return 2;
+        }
+    }
+
+    memset(&cfg, 0, sizeof(cfg));
+
+    if (hc.port <= 0 || hc.port > 65535) {
         fprintf(stderr, "invalid port\n");
+        hostconf_free(&hc);
         return 2;
     }
-    if ((cert && !key) || (key && !cert)) {
-        fprintf(stderr, "TLS needs both -c and -k\n");
+    if ((hc.cert && !hc.key) || (hc.key && !hc.cert)) {
+        fprintf(stderr, "TLS needs both a cert and a key\n");
+        hostconf_free(&hc);
         return 2;
     }
-    if (nthreads <= 0) {
+    if (hc.nthreads <= 0) {
         long n = sysconf(_SC_NPROCESSORS_ONLN);
-        nthreads = n > 0 ? (int)n : 1;
+        hc.nthreads = n > 0 ? (int)n : 1;
     }
-    if (nthreads > 256)
-        nthreads = 256;
+    if (hc.nthreads > 256)
+        hc.nthreads = 256;
+    if (hc.handshake_timeout_s > 0)
+        g_handshake_timeout_ms = hc.handshake_timeout_s * 1000u;
 
     signal(SIGPIPE, SIG_IGN);
 
-    if (passwd && auth_load(passwd) != 0)
-        return 1;
-
-    if (cert) {
-        g_tls = tls_init(cert, key);
-        if (!g_tls)
-            return 1;
+    if (hc.motd_path) {
+        motd = read_file(hc.motd_path);
+        if (!motd)
+            fprintf(stderr, "cannot read motd %s\n", hc.motd_path);
     }
+    if (hc.passwd && auth_load(hc.passwd) != 0) {
+        hostconf_free(&hc);
+        free(motd);
+        return 1;
+    }
+    if (hc.cert) {
+        g_tls = tls_init(hc.cert, hc.key);
+        if (!g_tls) {
+            hostconf_free(&hc);
+            free(motd);
+            return 1;
+        }
+    }
+    g_daemon = hc.daemon;
 
     /* fork into the background before creating any threads */
     if (g_daemon && daemonize() != 0) {
         fprintf(stderr, "daemonize failed\n");
+        hostconf_free(&hc);
+        free(motd);
         return 1;
     }
 
-    cfg.server_name = srvname;
-    cfg.network = network;
+    cfg.server_name = hc.srvname;
+    cfg.network = hc.network;
     cfg.motd = motd;
     cfg.version = "uircd-1.0";
-    cfg.require_login = require_login;
-    if (max_per_ip > 0)
-        cfg.max_per_ip = (unsigned)max_per_ip;
-    if (reg_timeout_s > 0)
-        cfg.reg_timeout_ms = (unsigned)reg_timeout_s * 1000u;
+    cfg.require_login = hc.require_login;
+    cfg.max_per_ip = hc.max_per_ip;
+    cfg.reg_timeout_ms = hc.reg_timeout_s * 1000u;
+    cfg.max_clients = hc.max_clients;
+    cfg.max_channels = hc.max_channels;
+    cfg.ping_interval_ms = hc.ping_interval_s * 1000u;
+    cfg.ping_timeout_ms = hc.ping_timeout_s * 1000u;
+    cfg.flood_lines = hc.flood_lines;
+    cfg.flood_window_ms = hc.flood_window_s * 1000u;
     cfg.out = on_out;
     cfg.drop = on_drop;
-    cfg.auth = passwd ? auth_verify : NULL;
+    cfg.auth = hc.passwd ? auth_verify : NULL;
     cfg.log = on_log;
     g_srv = uircd_new(&cfg);
     if (!g_srv) {
         fprintf(stderr, "uircd_new failed\n");
+        hostconf_free(&hc);
+        free(motd);
         return 1;
     }
 
-    g_nworkers = nthreads;
-    g_workers = calloc((size_t)nthreads, sizeof(*g_workers));
-    if (!g_workers)
+    g_nworkers = hc.nthreads;
+    g_workers = calloc((size_t)hc.nthreads, sizeof(*g_workers));
+    if (!g_workers) {
+        hostconf_free(&hc);
+        free(motd);
+        uircd_free(g_srv);
         return 1;
+    }
 
     /* Block termination signals so every worker thread inherits the block;
      * the main thread handles them with sigwait below. */
@@ -839,14 +1078,14 @@ main(int argc, char **argv)
     sigaddset(&block, SIGTERM);
     pthread_sigmask(SIG_BLOCK, &block, &old);
 
-    for (i = 0; i < nthreads; i++) {
+    for (i = 0; i < hc.nthreads; i++) {
         struct worker *w = &g_workers[i];
         w->id = i;
         w->is_ticker = (i == 0);
         w->spare_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
-        w->listen_fd = make_listener(port, use6);
+        w->listen_fd = make_listener(hc.port, hc.use6);
         if (w->listen_fd < 0) {
-            fprintf(stderr, "cannot bind port %d: %s\n", port,
+            fprintf(stderr, "cannot bind port %d: %s\n", hc.port,
                     strerror(errno));
             return 1;
         }
@@ -860,7 +1099,7 @@ main(int argc, char **argv)
             return 1;
         }
     }
-    for (i = 0; i < nthreads; i++) {
+    for (i = 0; i < hc.nthreads; i++) {
         if (pthread_create(&g_workers[i].thread, NULL, worker_main,
                            &g_workers[i]) != 0) {
             fprintf(stderr, "pthread_create failed\n");
@@ -869,8 +1108,8 @@ main(int argc, char **argv)
     }
 
     logmsg("miniircd: %s on port %d, %d worker%s, TLS %s, auth %s",
-           srvname, port, nthreads, nthreads == 1 ? "" : "s",
-           g_tls ? "on" : "off", passwd ? "on" : "off");
+           hc.srvname, hc.port, hc.nthreads, hc.nthreads == 1 ? "" : "s",
+           g_tls ? "on" : "off", hc.passwd ? "on" : "off");
 
     /* wait for a termination signal */
     do {
@@ -879,12 +1118,12 @@ main(int argc, char **argv)
     } while (sig != SIGINT && sig != SIGTERM);
 
     g_stop = 1;
-    for (i = 0; i < nthreads; i++)
+    for (i = 0; i < hc.nthreads; i++)
         wake(&g_workers[i]);
-    for (i = 0; i < nthreads; i++)
+    for (i = 0; i < hc.nthreads; i++)
         pthread_join(g_workers[i].thread, NULL);
 
-    for (i = 0; i < nthreads; i++) {
+    for (i = 0; i < hc.nthreads; i++) {
         while (g_workers[i].conns)
             close_conn(g_workers[i].conns);
         iox_loop_free(g_workers[i].loop);
@@ -897,6 +1136,7 @@ main(int argc, char **argv)
     uircd_free(g_srv);
     free(g_workers);
     free(motd);
+    hostconf_free(&hc);
     if (g_tls)
         SSL_CTX_free(g_tls);
     auth_free();

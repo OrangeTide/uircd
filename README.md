@@ -58,7 +58,28 @@ workers; shared IRC state is guarded by a single mutex.
 Two limits bound abuse from a single source: `-P N` caps concurrent connections
 per source IP (default 8), and `-R SEC` drops a connection that has not
 registered within the deadline (default 30s), so an idle unregistered session
-is reclaimed without waiting out the ping cycle.
+is reclaimed without waiting out the ping cycle. With TLS, `-H SEC` bounds how
+long a connection may sit in the handshake (default 10s), so a stalled handshake
+cannot hold a slot indefinitely.
+
+## Configuration
+
+The uircd library takes its settings as a struct (`struct uircd_config` passed
+to `uircd_new`); that is its settings API, and it reads no files. The example
+host adds its own settings and wires both to a gitconfig-style file, so the
+config format lives in the host, not the library.
+
+```sh
+./miniircd -f miniircd.conf              # read settings from a file
+./miniircd -f miniircd.conf -p 6697      # file settings, port overridden
+```
+
+Command-line options override the file. `example/miniircd.conf` is a documented
+sample; the sections are `[server]` (name, network, motd), `[listen]` (port,
+ipv6), `[tls]` (cert, key, handshake-timeout), `[auth]` (passwd, require-login),
+and `[limits]` (threads, max-per-ip, reg-timeout, max-clients, max-channels,
+ping-interval, ping-timeout, flood-lines, flood-window). Times are in seconds;
+an omitted key keeps the built-in default. `-h` lists every command-line option.
 
 ## Authentication
 
