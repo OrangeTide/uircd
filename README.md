@@ -77,8 +77,9 @@ host, not the library.
 ./miniircd -f miniircd.conf -p 6697      # file settings, port overridden
 ```
 
-Command-line options override the file. `example/miniircd.conf` is a documented
-sample; the sections are `[server]` (name, network, motd), `[listen]` (port,
+Command-line options override the file. `./miniircd -C -f miniircd.conf` parses
+and checks a configuration then exits, without binding a port. `example/miniircd.conf`
+is a documented sample; the sections are `[server]` (name, network, motd), `[listen]` (port,
 ipv6), `[tls]` (cert, key, handshake-timeout), `[auth]` (passwd, require-login),
 and `[limits]` (threads, max-per-ip, reg-timeout, max-clients, max-channels,
 ping-interval, ping-timeout, flood-lines, flood-window). Times are in seconds;

@@ -281,3 +281,41 @@ miniircd handles the SSL error returns and the handshake lifetime.
 - `HANDSHAKE_TIMEOUT_MS` is the default 10s. (Made configurable afterward via
   the `-H` flag and the `[tls] handshake-timeout` config key; not a security
   change, so no new ledger row.)
+
+## Round 8 (2026-11-18) -- config lexer fuzzing
+
+Closed round 7's gap: the gitconfig-style config lexer had not been fuzzed. It
+is local operator input, not a network/attacker surface, but it is still a
+parser of untrusted-shaped bytes, so it was checked for memory safety.
+
+### Observed
+
+- Added a config-check mode to the host (`-C`): it loads the config file and
+  applies the command line, runs the same validation, prints `config OK` or a
+  file:line error, and exits without binding a socket or starting a thread. This
+  is the fuzz entry point and a useful operator "configtest".
+- Drove `miniircd -C -f <file>` (built under ASan+UBSan, `detect_leaks=1`,
+  `abort_on_error=1`) over 3000 adversarial files from
+  `HARDEN/harness/conf_fuzz.c`: random bytes with embedded NULs, a single huge
+  line past the 1 MiB `read_file` cap, hundreds of thousands of lines, long runs
+  of `[`, giant section names and key/value pairs (~100 KB), numeric overflow
+  and edge values on real keys, CR/tab/whitespace noise, a UTF-8 BOM, and
+  pathological separators.
+- Result: 0 crashes, 0 hangs, 0 sanitizer reports, 0 leaks. Malformed files are
+  rejected with a file:line message and a nonzero exit; files over the 1 MiB cap
+  are refused by `read_file` before the lexer sees them.
+
+### Judged
+
+- No finding. The lexer works on stack buffers and a single heap buffer from
+  `read_file`: `strtok_r` over a NUL-terminated copy, `trim` by pointer
+  arithmetic, `strchr` for the structural bytes, and `snprintf` into a
+  fixed `section[64]` (safe truncation). Numeric values go through
+  `uircd_config_set`'s `strtoul` validation. No key, value, line, or section
+  length can overrun a buffer.
+
+### Not checked this round
+
+- The fuzzer is a structural generator, not coverage-guided; a libFuzzer or AFL
+  harness over `load_config` in isolation would explore more paths. The config
+  file remains trusted local operator input, so this was judged sufficient.

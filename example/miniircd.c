@@ -923,6 +923,7 @@ usage(const char *prog)
         "  -R SEC       drop unregistered sessions after SEC seconds"
         " (default 30)\n"
         "  -H SEC       TLS handshake deadline in seconds (default 10)\n"
+        "  -C           parse and check the configuration, then exit\n"
         "  -d           daemonize (background)\n"
         "  -h           this help\n"
         "Command-line options override settings from -f.\n",
@@ -956,13 +957,13 @@ apply_opt(struct hostconf *hc, int opt, const char *arg)
 int
 main(int argc, char **argv)
 {
-    static const char *optstr = "f:p:6t:c:k:A:Ln:N:m:P:R:H:dh";
+    static const char *optstr = "f:p:6t:c:k:A:Ln:N:m:P:R:H:Cdh";
     struct uircd_config cfg;
     struct hostconf hc;
     const char *cfgpath = NULL;
     char *motd = NULL;
     sigset_t block, old;
-    int sig, i, opt;
+    int sig, i, opt, check_only = 0;
 
     hostconf_defaults(&hc);
 
@@ -994,6 +995,10 @@ main(int argc, char **argv)
             hostconf_free(&hc);
             return 0;
         }
+        if (opt == 'C') {
+            check_only = 1;
+            continue;
+        }
         if (apply_opt(&hc, opt, optarg) != 0) {
             usage(argv[0]);
             hostconf_free(&hc);
@@ -1019,6 +1024,13 @@ main(int argc, char **argv)
         hc.nthreads = 256;
     if (hc.handshake_timeout_s > 0)
         g_handshake_timeout_ms = hc.handshake_timeout_s * 1000u;
+
+    if (check_only) {
+        /* configuration parsed and validated; do not bind or start threads */
+        fprintf(stderr, "config OK\n");
+        hostconf_free(&hc);
+        return 0;
+    }
 
     signal(SIGPIPE, SIG_IGN);
 

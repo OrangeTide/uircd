@@ -140,3 +140,21 @@ H-010	WARN	FIXED	host-net	Half-open TLS handshakes were unbounded: a connection 
   (very long lines, embedded NULs, deep repetition); it is treated as trusted
   local operator input, parsed with bounded `read_file` (1 MiB cap) and
   fixed-size section buffers.
+
+- 2026-11-18, round 8 (config lexer fuzzing, no finding, `tree:round-8`). Closed
+  round 7's gap. Added a config-check mode (`-C`) that parses and validates the
+  configuration then exits without binding or threading, both a useful operator
+  "configtest" and the fuzz entry point. Drove `miniircd -C -f` (built ASan+UBSan,
+  leak detection on) over 3000 adversarial files from
+  `HARDEN/harness/conf_fuzz.c` (random bytes with embedded NULs, a huge line past
+  the 1 MiB cap, hundreds of thousands of lines, unbalanced brackets, ~100 KB
+  section names and key/value pairs, numeric overflow and edge values, CR/tab
+  noise, a BOM, pathological separators). Result: 0 crashes, 0 hangs, 0 sanitizer
+  reports, 0 leaks; malformed files are rejected with a file:line message, and
+  oversized files are refused by `read_file` before the lexer runs. No finding:
+  the lexer uses stack buffers and one `read_file` heap buffer with no
+  length-dependent copy that can overrun. `make check` and the optimized build
+  still pass. No ledger row added; the report is unchanged.
+  Not checked this round: the fuzzer is a structural generator, not
+  coverage-guided (no libFuzzer/AFL over `load_config` in isolation); judged
+  sufficient for trusted local operator input.
