@@ -23,6 +23,7 @@ H-007	BLOCK	FIXED	host-net	Heap-use-after-free in the threaded host: when one fd
 H-008	NOTE	FIXED	host-net	Data race on the shutdown flag g_stop: declared volatile sig_atomic_t, written unlocked by the main thread after sigwait and read by every worker, which is async-signal safe but not a thread synchronization and races under TSan	example/miniircd.c g_stop; example/miniircd.c on_wake; example/miniircd.c worker_main	Same TSan run as H-007: TSan reports a data race on g_stop (main write vs worker read) before the fix, 0 after; g_stop is now atomic_int so direct reads and writes are atomic	HARDEN/host-net.md#3	tree:round-3
 H-009	WARN	FIXED	host-net	Descriptor-exhaustion busy-loop: on accept() returning EMFILE/ENFILE/ENOBUFS/ENOMEM the handler just broke out, but libiox is level-triggered, so a connection left queued kept the listener readable and on_accept respun at 100% CPU (one core pegged) for as long as the fd table stayed full, a self-inflicted or attacker-induced livelock; the condition was also logged nowhere	example/miniircd.c on_accept	HARDEN/harness/emfile_load.c against a server run with a low RLIMIT_NOFILE: server CPU over a 3s exhaustion window is ~300 ticks (a pegged core) before the fix and ~1 after; the fix frees a reserved fd to accept-and-close the backlog (shedding load, logged rate-limited) and resumes accepting when fds free	HARDEN/host-net.md#4	tree:round-4
 H-010	WARN	FIXED	host-net	Half-open TLS handshakes were unbounded: a connection is registered with the engine (uircd_accept) only after the handshake completes, so max_clients, the per-IP cap, and the registration deadline (all enforced in the engine) did not apply while handshaking. A slow or abandoned TLS handshake held an fd and an SSL object indefinitely, and one IP could hold far more than its cap, a slowloris/resource-exhaustion DoS	example/miniircd.c on_accept (TLS branch); example/miniircd.c on_tick; example/miniircd.c drive_handshake	HARDEN/harness/tls_fuzz.c slowloris mode against an ASan server with -P 2: 200 half-open handshakes from one IP are all held (server fd count rises by ~200 and never falls) before the fix; after, each worker sweeps its own conns in on_tick and closes any still handshaking past HANDSHAKE_TIMEOUT_MS (10s), so the fd count returns to baseline	HARDEN/host-net.md#6	tree:round-6
+H-011	WARN	FIXED	host-net	The EMFILE reserve-shed busy-looped under a hard process-wide RLIMIT_NOFILE with multiple workers. On exhaustion each worker freed its reserved fd to accept-and-close its backlog, but N workers share one fd table, so a worker that lost the race to reopen its reserve had no slot to shed with and respun the still-readable listener. H-009 bounded the single-worker case; this is the multi-worker process-wide case, measured with all four workers pegged (process CPU ~400 ticks/sec) under sustained exhaustion	example/miniircd.c on_accept (EMFILE branch); example/miniircd.c on_relisten	HARDEN/harness/emfile_load.c against a 4-worker server under a hard ulimit (ulimit -n 96): process utime+stime over a 4s exhaustion window is ~1600 ticks (all workers pegged) before the fix and ~2 after; the fix pauses the listener with iox_fd_mod(...,0) and re-arms it after a 100ms backoff timer (on_relisten), and a client is served once descriptors free	HARDEN/host-net.md#10	tree:round-10
 ```
 
 ## Round log
@@ -174,3 +175,17 @@ H-010	WARN	FIXED	host-net	Half-open TLS handshakes were unbounded: a connection 
   Not checked this round: the record layer below the OpenSSL API (malformed,
   overlapping, or compressed records, byte-level alert flooding) was not fuzzed;
   OpenSSL stays the trusted record-layer boundary.
+
+- 2026-11-18, round 10 (fix in the round-10 working tree, `tree:round-10`).
+  Closed round 4's open caveat by stress-testing the EMFILE reserve-shed across
+  many workers at a hard process-wide `RLIMIT_NOFILE`. Found H-011: with workers
+  sharing one fd table, a worker that loses the race to reopen its reserved fd
+  has no slot to shed with and respins the still-readable listener; measured all
+  four workers pegged (~1600 process CPU ticks over a 4s window) with `ulimit -n
+  96 -t 4`. Fixed by pausing the listener (`iox_fd_mod(...,0)`) and re-arming it
+  after a 100 ms backoff (`on_relisten`), which bounds CPU regardless of reserve
+  availability; CPU drops to ~2 ticks and accepting resumes once descriptors
+  free. Checked clean under ASan and TSan at the hard limit; the single-worker
+  H-009 case stays at ~1 tick. `make check` and the optimized build still pass.
+  H-011 is WARN, FIXED.
+  Not checked this round: the 100 ms accept backoff is fixed, not configurable.

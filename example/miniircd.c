@@ -43,6 +43,7 @@
 #define MAX_OUTBUF   (1u << 20)   /* 1 MiB per-connection output cap */
 #define READ_CHUNK   8192
 #define TICK_MS      1000
+#define ACCEPT_BACKOFF_MS 100 /* pause accepting this long on fd exhaustion */
 #define DEF_HANDSHAKE_TIMEOUT_MS 10000 /* reclaim a stalled TLS handshake */
 
 /* Host-side TLS handshake deadline, configurable (see load_config). */
@@ -427,6 +428,15 @@ on_writable(struct iox_loop *loop, int fd, unsigned events, void *arg)
     pthread_mutex_unlock(&g_lock);
 }
 
+/* Re-arm a listener that on_accept paused after fd exhaustion. */
+static void
+on_relisten(struct iox_loop *loop, void *arg)
+{
+    struct worker *w = arg;
+    if (!g_stop)
+        iox_fd_mod(loop, w->listen_fd, IOX_READ);
+}
+
 static void
 on_accept(struct iox_loop *loop, int fd, unsigned events, void *arg)
 {
@@ -470,6 +480,14 @@ on_accept(struct iox_loop *loop, int fd, unsigned events, void *arg)
                     }
                     w->spare_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
                 }
+                /* Shedding the current backlog is not enough: with several
+                 * workers sharing one process-wide fd limit, a worker that
+                 * loses the race to reopen its reserve has no slot to shed with
+                 * and would spin on the still-readable listener. Stop polling
+                 * the listener and re-arm it after a short backoff, so CPU is
+                 * bounded no matter how long the table stays full. */
+                iox_fd_mod(w->loop, fd, 0);
+                iox_timer_add(w->loop, ACCEPT_BACKOFF_MS, on_relisten, w);
                 break;
             }
             break; /* EAGAIN or another transient error: done for now */

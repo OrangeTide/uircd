@@ -353,3 +353,40 @@ record layer is OpenSSL's and trusted; the target is miniircd's own non-blocking
 - The record layer itself (malformed/overlapping/compressed records, alert
   flooding at the byte level) was not fuzzed below the OpenSSL API; OpenSSL
   remains the trusted record-layer boundary.
+
+## Round 10 (2026-11-18) -- reserve-shed under a hard process-wide fd limit
+
+Closed round 4's open caveat: the EMFILE reserve-shed had not been stress-tested
+across many workers at a hard process-wide `RLIMIT_NOFILE`. Doing so found a
+busy-loop.
+
+### 1. Reserve-shed busy-loops under a hard process-wide limit  [H-011]
+
+- **Claim:** H-009 bounded the single-worker EMFILE case with a per-worker
+  reserved fd. But `RLIMIT_NOFILE` is per process, shared by every worker. With
+  several workers all hitting EMFILE, a worker closes its reserve to shed, and by
+  the time it tries to reopen the reserve another worker (or a fresh accept) has
+  taken the freed slot, so the reopen fails and `spare_fd` stays -1. With no
+  reserve the shed branch is skipped, `on_accept` breaks, and the still-readable
+  listener re-fires it immediately: that worker spins. Under sustained exhaustion
+  all workers spin.
+- **Lines:** example/miniircd.c `on_accept` (the EMFILE branch relied solely on
+  the reserve to make progress).
+- **Scenario:** `ulimit -n 96`, `-t 4`, flood from several holders. Process
+  `utime+stime` over a 4-second exhaustion window: ~1600 ticks, i.e. all four
+  cores pegged.
+- **Falsifier:** `HARDEN/harness/emfile_load.c` against a 4-worker server under
+  a hard `ulimit`. Measured ~1600 CPU ticks over the window before the fix, ~2
+  after. Reproduced both directions this round.
+- **Fix shape:** after shedding, pause the listener (`iox_fd_mod(loop, fd, 0)`)
+  and re-arm it after a short backoff with a one-shot timer (`on_relisten`, 100
+  ms). CPU is then bounded no matter how long the table stays full or whether the
+  reserve can be reopened, and accepting resumes within a backoff of descriptors
+  freeing (verified: a client is served after the flood releases). **Fixed this
+  round.** Checked clean under ASan and TSan at the hard limit; the single-worker
+  H-009 case stays at ~1 tick; `make check` still passes.
+
+### Not checked this round
+
+- The backoff is a fixed 100 ms, not tuned or configurable; adequate to bound
+  CPU while keeping accept latency low when descriptors free.
