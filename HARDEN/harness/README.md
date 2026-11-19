@@ -57,6 +57,27 @@ cc -fsanitize=address,undefined -fno-omit-frame-pointer -g -std=c11 \
 Expected on the fixed tree: `survived`, exit 0. On the pre-fix tree the
 assertions abort because the wrong client was removed.
 
+## async_auth  (H-013)
+
+Drives the real `uircd.c` through the deferred-authentication path
+(`UIRCD_AUTH_PENDING` + `uircd_auth_complete`), single-threaded, so it exercises
+the engine contract rather than the host's KDF pool. It asserts that a pending
+verdict parks the client and holds its further input, a later accept replays the
+held NICK/USER to register, a reject drops the client, hold-cap overflow drops
+it, a close mid-pending frees the hold buffer, and a deferred OPER grants on
+accept.
+
+```sh
+cd HARDEN/harness
+cc -fsanitize=address,undefined -fno-omit-frame-pointer -g -std=c11 \
+   -D_GNU_SOURCE -I../.. async_auth.c -o async_auth
+./async_auth     # prints "survived" when the deferred-auth path is correct
+```
+
+Expected on the fixed tree: `survived`, exit 0. Against an engine whose
+`uircd_auth_complete` does not apply the verdict (or that fails to hold input),
+an assertion fails and it exits nonzero.
+
 ## tsan_load  (H-007, H-008)
 
 A load driver, not a self-contained harness: it needs a running server. Build

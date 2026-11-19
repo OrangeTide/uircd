@@ -1,9 +1,9 @@
 # HARDEN report: HARDEN ledger -- uircd
 
-stamp: 20261119-155221
-ledger-hash: 238ed
+stamp: 20261119-160932
+ledger-hash: 250e5
 source: HARDEN.md (the ledger block)
-replaces: HARDEN/archive/HARDEN-REPORT.20261119-r12pre.md
+replaces: HARDEN/archive/HARDEN-REPORT.20261119-r13pre.md
 
 ## Top sheet
 
@@ -15,9 +15,7 @@ An open BLOCK breaks a contract the project states today; an open HOLD needs a r
 
 ### Since the archived report
 
-- H-003 NOTE FIXED (was NOTE ACCEPTED)
-- H-012 WARN FIXED (was WARN OPEN)
-- H-013 OPP FIXED (was OPP OPEN)
+- no change in ids, severities or states since the archived report
 
 ## Counts
 
@@ -72,5 +70,5 @@ H-009	WARN	FIXED	host-net	Descriptor-exhaustion busy-loop: on accept() returning
 H-010	WARN	FIXED	host-net	Half-open TLS handshakes were unbounded: a connection is registered with the engine (uircd_accept) only after the handshake completes, so max_clients, the per-IP cap, and the registration deadline (all enforced in the engine) did not apply while handshaking. A slow or abandoned TLS handshake held an fd and an SSL object indefinitely, and one IP could hold far more than its cap, a slowloris/resource-exhaustion DoS	example/miniircd.c on_accept (TLS branch); example/miniircd.c on_tick; example/miniircd.c drive_handshake	HARDEN/harness/tls_fuzz.c slowloris mode against an ASan server with -P 2: 200 half-open handshakes from one IP are all held (server fd count rises by ~200 and never falls) before the fix; after, each worker sweeps its own conns in on_tick and closes any still handshaking past HANDSHAKE_TIMEOUT_MS (10s), so the fd count returns to baseline	HARDEN/host-net.md#6	tree:round-6
 H-011	WARN	FIXED	host-net	The EMFILE reserve-shed busy-looped under a hard process-wide RLIMIT_NOFILE with multiple workers. On exhaustion each worker freed its reserved fd to accept-and-close its backlog, but N workers share one fd table, so a worker that lost the race to reopen its reserve had no slot to shed with and respun the still-readable listener. H-009 bounded the single-worker case; this is the multi-worker process-wide case, measured with all four workers pegged (process CPU ~400 ticks/sec) under sustained exhaustion	example/miniircd.c on_accept (EMFILE branch); example/miniircd.c on_relisten	HARDEN/harness/emfile_load.c against a 4-worker server under a hard ulimit (ulimit -n 96): process utime+stime over a 4s exhaustion window is ~1600 ticks (all workers pegged) before the fix and ~2 after; the fix pauses the listener with iox_fd_mod(...,0) and re-arms it after a 100ms backoff timer (on_relisten), and a client is served once descriptors free	HARDEN/host-net.md#10	tree:round-10
 H-012	WARN	FIXED	auth	The scrypt KDF ran under the single global lock: on_readable held g_lock across uircd_recv -> cmd_pass/cmd_oper -> cfg.auth, so the ~61ms scrypt ran while holding g_lock and one login stalled every worker. Reachable with no secret (a bare PASS matches a shared * entry). Fixed: cmd_pass/cmd_oper return UIRCD_AUTH_PENDING, the host runs the KDF in a bounded pool with no lock held, and the verdict is applied later via uircd_auth_complete	example/miniircd.c on_auth (enqueue, no KDF under lock), kdf_main (auth_compute off-lock); uircd.c cmd_pass, cmd_oper (PENDING), uircd_auth_complete	A registered observer PING RTT stays within normal bounds while a login flood is in flight; satisfied structurally (auth_compute holds no engine lock) and confirmed by a TSan run showing the KDF pool runs off g_lock with 0 races; dedicated RTT harness not run	HARDEN/auth.md#2	tree:round-12
-H-013	OPP	FIXED	auth	Asynchronous authentication: run the KDF off the global lock in a bounded pool and deliver the login verdict at a scheduled deadline with jitter, closing both the timing enumeration (H-003) and the global-lock stall (H-012) without a decoy-KDF DoS. Implemented: UIRCD_AUTH_PENDING + uircd_auth_complete in the engine (holding the client's input until the verdict), and a bounded KDF thread pool, deadline timer, and {worker,auth_id} lifetime token in the host	uircd.h (UIRCD_AUTH_PENDING, uircd_auth_complete); uircd.c cmd_pass, cmd_oper, uircd_auth_complete, feed_bytes/hold; example/miniircd.c on_auth, kdf_main, on_auth_deadline, auth_warmup; example/auth.c auth_lookup/auth_compute	An unknown-name flood costs ~no server CPU (auth_compute skips scrypt on a miss); the engine, host, and KDF pool run clean under ASan+UBSan and TSan (0 races, 0 leaks) over concurrent logins including mid-auth closes; see H-003 and H-012 for the timing and lock falsifiers	HARDEN/DESIGN-async-auth.md	tree:round-12
+H-013	OPP	FIXED	auth	Asynchronous authentication: run the KDF off the global lock in a bounded pool and deliver the login verdict at a scheduled deadline with jitter, closing both the timing enumeration (H-003) and the global-lock stall (H-012) without a decoy-KDF DoS. Implemented: UIRCD_AUTH_PENDING + uircd_auth_complete in the engine (holding the client's input until the verdict), and a bounded KDF thread pool, deadline timer, and {worker,auth_id} lifetime token in the host	uircd.h (UIRCD_AUTH_PENDING, uircd_auth_complete); uircd.c cmd_pass, cmd_oper, uircd_auth_complete, feed_bytes/hold; example/miniircd.c on_auth, kdf_main, on_auth_deadline, auth_warmup; example/auth.c auth_lookup/auth_compute	HARDEN/harness/async_auth.c drives the real uircd.c through UIRCD_AUTH_PENDING/uircd_auth_complete and prints "survived": a deferred accept replays held NICK/USER to register, a deferred reject drops the client, hold-cap overflow drops it, a close mid-pending frees the hold buffer, and a deferred OPER grants on accept, all under ASan+UBSan (verified to FAIL on an engine whose uircd_auth_complete is a no-op). An unknown-name flood costs ~no server CPU (auth_compute skips scrypt on a miss); engine, host, and KDF pool also ran clean under TSan (0 races, 0 leaks) over concurrent logins including mid-auth closes	HARDEN/DESIGN-async-auth.md	tree:round-13
 ```
