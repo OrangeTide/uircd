@@ -53,3 +53,47 @@ and hash.
   upstream, public-domain implementation and not re-audited.
 - No check that the operator sets restrictive file permissions on the passwd
   file; that is deployment guidance, noted in the README, not enforced in code.
+
+## Round 2 (2026-11-19)
+
+Reviewing H-003 (timing enumeration) surfaced a second, larger defect in the same
+code path, and a design that resolves both.
+
+### Observed
+
+- Measured `auth_verify` directly: ~61 ms for a known name with a wrong password
+  (full scrypt) versus ~0.001 ms for an unknown name, a ~60,000x gap and a
+  trivially remote-measurable enumeration signal. This confirms H-003 with a
+  number, where round 1 reasoned it from the lines.
+- The enumeration also distinguishes oper-capable names: for `OPER`, the
+  `!(e->flags & FLAG_OPER)` check returns before scrypt, so a slow `OPER name x`
+  identifies a name that holds oper privilege, which `WHO` does not reveal. The
+  gap likewise exposes account names that are offline or never connect, again not
+  visible through normal IRC commands. So the "names are not secret" basis for
+  accepting H-003 is weaker than round 1 stated.
+
+### Judged
+
+#### 1. The scrypt KDF runs under the global lock  [H-012]
+
+- **Claim:** `auth_verify`'s ~61 ms scrypt runs while the host holds the single
+  global lock. `on_readable` takes `g_lock` across `uircd_recv` (`miniircd.c`),
+  which dispatches `PASS`/`OPER` to `cmd_pass`/`cmd_oper`, which call `cfg.auth`
+  (`uircd.c:895,911`). Under one global lock, that 61 ms serializes every worker:
+  one login stalls the whole server. It is reachable without any secret, since a
+  bare `PASS <pw>` matches a shared `*` entry and account names are not secret;
+  with the flood and per-IP limits a single IP can hold the lock a large fraction
+  of the time, an availability DoS.
+- **Lines:** example/miniircd.c `on_readable` (`g_lock` across `uircd_recv`);
+  uircd.c `cmd_pass`, `cmd_oper` (`cfg.auth` under the lock); example/auth.c
+  `auth_verify`.
+- **Scenario:** a registered observer pings in a loop while a few connections
+  send bad logins; the observer's trivial `PING` requests queue behind serialized
+  61 ms KDFs and stall far past normal RTT (observed: the probe hangs).
+- **Falsifier:** a registered observer's `PING` RTT stays within normal bounds
+  while a login flood is in flight. True only when the KDF no longer runs under
+  `g_lock`. Grounded this round in the measured 61 ms KDF plus the code path
+  holding `g_lock`; to be measured cleanly on implementation.
+- **Fix shape:** the async-auth redesign in `HARDEN/DESIGN-async-auth.md`: run the
+  KDF off the lock in a bounded pool and deliver the verdict at a scheduled
+  deadline. The same design closes H-003. **Open**, designed not yet built.
