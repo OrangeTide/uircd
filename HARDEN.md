@@ -447,3 +447,21 @@ H-018	NOTE	FIXED	protocol	The engine left a plaintext password in its input buff
   cloak to everyone (operators read a real address via WHO, not a prefix); the
   threaded host and TLS paths were not separately re-exercised (the cloak is
   engine-level and transport-independent).
+
+- 2026-11-19, round 23 (CI on the supply-chain surface, no finding,
+  `tree:round-23`). A GitHub Actions workflow was added
+  (.github/workflows/ci.yml), a new build/supply-chain element, so this round
+  reviewed it (HARDEN/supply-chain.md round 3). It is least privilege: top-level
+  permissions grant only contents: read, it uses no secrets and builds no release
+  artifact, its only action is the official actions/checkout@v6 (no third-party
+  actions to SHA-pin), its only install is libssl-dev from the Ubuntu repos (no
+  fetched binary piped to a shell), and it triggers on push/pull_request (not
+  pull_request_target), so fork PRs run read-only with no secrets. The jobs only
+  build and run the existing falsifiers (make check under ASan+UBSan, and make
+  tsan plus the tsan_load driver with a race failing the job; the TSan recipe was
+  validated locally at 0 races). No finding: the ledger block is unchanged, so
+  the report stays current.
+  Not checked this round: CI runs the harnesses and the TSan load only, not the
+  longer campaigns (the multi-seed dispatch_fuzz sweep, auth_timing, the TLS
+  fuzzers), which stay manual; any later workflow adding a release, a publish
+  step, a third-party action, or wider permissions needs its own review.

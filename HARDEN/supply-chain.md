@@ -139,3 +139,44 @@ surfaced a security regression the vendoring had introduced.
   disassembled; the fix removes the dependence on that, which is the point.
 - The host's broader memory hygiene (other transient copies of credentials in the
   engine or TLS buffers) was not swept; this round covered the named wipe sites.
+
+## Round 3 (2026-11-19)
+
+No finding. A continuous-integration workflow was added
+(`.github/workflows/ci.yml`), which is a new piece of the build and supply-chain
+surface (the CI token's permissions, what the pipeline runs, and what it ships).
+This round records that it is configured with least privilege.
+
+### Observed
+
+- The workflow declares `permissions: contents: read` at the top level and
+  grants nothing else, so the `GITHUB_TOKEN` it runs with cannot write to the
+  repository, packages, pages, or deployments. No per-job block widens that.
+- It uses no secrets, builds no release artifact, and publishes nothing. The two
+  jobs only build the project and run the existing falsifiers: `make` plus the
+  config check and `make check` (ASan+UBSan harnesses), and `make tsan` plus the
+  `tsan_load` driver with a race turning the job red.
+- The only action used is `actions/checkout@v6`, an official `actions/*` action
+  pinned by major version; there are no third-party actions to pin by commit SHA.
+  The only package install is `libssl-dev` from the runner's Ubuntu repositories,
+  not a fetched binary piped into a shell.
+- It triggers on `push` and `pull_request` to `main`, not `pull_request_target`,
+  so a pull request from a fork runs with a read-only token and no access to
+  secrets (the GitHub default), and cannot exfiltrate or tamper through CI.
+
+### Judged
+
+No new finding: the token is read-only, no secret is exposed, and the pipeline
+fetches no untrusted build input. The re-runnable check is to read
+`.github/workflows/ci.yml` and confirm `permissions:` grants no more than
+`contents: read`, that it names no `secrets`, and that it uses no
+`pull_request_target`.
+
+### Not checked this round
+
+- CI only runs the harnesses and the TSan load; it does not run the longer
+  campaigns (the multi-seed `dispatch_fuzz` sweep, the `auth_timing` driver, the
+  TLS fuzzers), which stay manual.
+- Any later workflow that adds a release, a publish step, a third-party action, or
+  a widened `permissions:` would change this surface and needs its own review;
+  a third-party action must then be pinned by commit SHA.
