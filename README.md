@@ -27,6 +27,10 @@ uircd_tick(s, now_ms);          /* call ~1/sec: pings, timeouts */
 The core is **not** thread-safe by design; a threaded host serializes every
 call behind one lock. `example/miniircd.c` shows exactly that.
 
+See [`API.md`](API.md) for the full API reference (types, callbacks, lifecycle,
+the deferred-auth flow, and the admin functions). The API is not frozen and may
+change between releases.
+
 ## Building
 
 ```sh

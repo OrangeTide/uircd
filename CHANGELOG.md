@@ -3,6 +3,14 @@
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- `API.md`: a reference for the public library API (`uircd.h`), covering types,
+  callbacks, lifecycle, the deferred-auth flow, and the admin functions, with a
+  note that the API is not frozen and may change between releases.
+
 ## 0.2.1 - 2026-11-19
 
 ### Fixed
