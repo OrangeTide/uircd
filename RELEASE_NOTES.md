@@ -1,9 +1,15 @@
-# uircd 0.1.0
+# uircd 0.2.0
 
-First release of uircd: a network-agnostic IRC server engine (`uircd.h`,
-`uircd.c`) and `miniircd`, a threaded TLS example daemon built on it. This is an
-early, intentionally minimal release: the public API is still settling and the
-IRC command set is a subset. See "Known limitations".
+uircd is a network-agnostic IRC server engine (`uircd.h`, `uircd.c`) and
+`miniircd`, a threaded TLS example daemon built on it. This is an early,
+intentionally minimal release: the public API is still settling and the IRC
+command set is a subset. See "Known limitations".
+
+## Changes since 0.1.0
+
+- Added `WHOIS` (user, channels, server, operator status, end; 401 for an
+  unknown nick). The host in the reply respects cloaking: an operator sees the
+  real address, others see the cloak.
 
 ## Highlights
 
@@ -59,8 +65,8 @@ core (`uircd.c`) itself needs none of these. A source tarball can be built with
 
 ## Known limitations
 
-- The IRC command set is a subset; WHOIS, AWAY, ISON, USERHOST, INVITE,
-  WALLOPS, VERSION, LUSERS, and MOTD-as-a-command are not implemented, and an
+- The IRC command set is a subset; AWAY, ISON, USERHOST, INVITE, WALLOPS,
+  VERSION, LUSERS, and MOTD-as-a-command are not implemented, and an
   unimplemented command returns a 421 reply.
 - The public API is not yet frozen and may change before 1.0; the auth callback
   contract in particular changed late in development.
