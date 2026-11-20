@@ -1,23 +1,18 @@
-# uircd 0.2.1
+# uircd 0.2.2
 
 uircd is a network-agnostic IRC server engine (`uircd.h`, `uircd.c`) and
 `miniircd`, a threaded TLS example daemon built on it. This is an early,
 intentionally minimal release: the public API is still settling and the IRC
 command set is a subset. See "Known limitations".
 
-## Changes since 0.2.0
+## Changes since 0.2.1
 
-Interoperability fixes found by testing against the irssi client:
+- Added `API.md`, a reference for the public library API (`uircd.h`): types,
+  callbacks, lifecycle, the deferred-auth flow, and the admin functions, with a
+  note that the API is not frozen and may change between releases.
 
-- Respond to `CAP LS`/`LIST` with an empty capability list (and `NAK`
-  requests), so a client doing capability negotiation on connect finishes at
-  once instead of waiting.
-- A bare channel list-mode query (`MODE #chan b`, sent by clients on join) now
-  returns the end-of-list numeric (`368`, and `349`/`347` for `e`/`I`) rather
-  than `482 You're not channel operator`.
-
-0.2.0 added `WHOIS` (user, channels, server, operator status, end; 401 for an
-unknown nick), with the host in the reply respecting cloaking.
+Recent releases: 0.2.1 fixed `CAP LS` and the on-join channel ban-list query for
+real clients (found with irssi); 0.2.0 added `WHOIS`.
 
 ## Highlights
 
