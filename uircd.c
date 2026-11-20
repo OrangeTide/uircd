@@ -781,7 +781,7 @@ send_motd(struct uircd *s, struct uircd_client *c)
 static void
 complete_registration(struct uircd *s, struct uircd_client *c)
 {
-    const char *ver = s->cfg.version ? s->cfg.version : "uircd-1.0";
+    const char *ver = s->cfg.version ? s->cfg.version : "uircd";
 
     c->registered = 1;
     numeric(s, c, 1, ":Welcome to the %s IRC Network %s",

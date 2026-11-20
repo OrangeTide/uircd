@@ -6,12 +6,29 @@
 #   make check        build and run the HARDEN falsifiers under sanitizers
 #   make test         build and run the functional test suite under sanitizers
 #   make install      install binaries, man pages, and a sample config
+#   make dist         build a source tarball for the current version
 #   make clean
+#
+# The version comes from version.mk, refined by git describe. Release steps:
+# bump version.mk, commit, tag v<version>, then run make release-check.
 
 CC      ?= cc
 IOX_DIR    = third_party/libiox
 SCRYPT_DIR = third_party/scrypt
 EX         = example
+
+# Version. version.mk is the authoritative number; git describe only refines a
+# built tree (tag -> "1.0.0", commits past a tag -> "1.0.0-N-gsha", an untagged
+# tree -> "1.0.0-dev-gsha"). Matching v$(UIRCD_VERSION), not v*, keeps a vendored
+# copy from describing itself against a host project's tags.
+include version.mk
+GIT_DESC := $(shell git describe --tags --dirty --match 'v$(UIRCD_VERSION)' 2>/dev/null)
+ifeq ($(GIT_DESC),)
+GIT_SUFFIX := $(shell git describe --always --dirty 2>/dev/null | sed 's/^/-dev-g/')
+else
+GIT_SUFFIX := $(patsubst v$(UIRCD_VERSION)%,%,$(GIT_DESC))
+endif
+VERSION := $(UIRCD_VERSION)$(GIT_SUFFIX)
 
 # Install layout. Override PREFIX (or the individual dirs), and DESTDIR for a
 # staged/packaging install, e.g. make DESTDIR=/tmp/pkg PREFIX=/usr install.
@@ -68,6 +85,17 @@ all: $(BINS)
 miniircd: $(LIB_OBJS) $(IOX_OBJS) $(SCRYPT_OBJS) $(EX_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+# Generated version header (build output, not committed). FORCE keeps it in step
+# with the current git state; the cmp guard avoids touching its mtime, so only a
+# real version change triggers a recompile.
+version.h: version.mk FORCE
+	@printf '#ifndef UIRCD_VERSION_H\n#define UIRCD_VERSION_H\n#define UIRCD_VERSION "%s"\n#endif\n' '$(VERSION)' > $@.tmp
+	@cmp -s $@.tmp $@ 2>/dev/null || mv $@.tmp $@
+	@rm -f $@.tmp
+
+$(EX)/miniircd.o: version.h
+FORCE:
+
 uircdpasswd: $(TOOL_OBJS) $(SCRYPT_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^
 
@@ -112,9 +140,29 @@ test:
 	    $(TEST_DIR)/functional.c -o $(TEST_DIR)/functional
 	@$(TEST_DIR)/functional
 
+# Verify version.mk and the git tag agree before cutting a release.
+release-check:
+	@v=$(UIRCD_VERSION); \
+	if ! git rev-parse --verify --quiet "refs/tags/v$$v" >/dev/null; then \
+	    echo "release-check: no tag v$$v (version.mk says $$v)" >&2; exit 1; \
+	fi; \
+	if [ "$$(git rev-parse "v$$v^{commit}")" != "$$(git rev-parse HEAD)" ]; then \
+	    echo "release-check: tag v$$v is not at HEAD" >&2; exit 1; \
+	fi; \
+	if [ -n "$$(git status --porcelain)" ]; then \
+	    echo "release-check: working tree is dirty" >&2; exit 1; \
+	fi; \
+	echo "release-check: v$$v ok"
+
+# Build a source tarball of the committed tree for the current version.
+dist:
+	git archive --format=tar.gz --prefix=uircd-$(UIRCD_VERSION)/ \
+	    -o uircd-$(UIRCD_VERSION).tar.gz HEAD
+	@echo "wrote uircd-$(UIRCD_VERSION).tar.gz"
+
 clean:
 	rm -f $(BINS) $(LIB_OBJS) $(IOX_OBJS) $(SCRYPT_OBJS) \
-	    $(EX_OBJS) $(TOOL_OBJS) \
+	    $(EX_OBJS) $(TOOL_OBJS) version.h \
 	    $(addprefix $(HARNESS_DIR)/,$(HARNESSES)) \
 	    $(TEST_DIR)/functional
 
@@ -138,4 +186,5 @@ uninstall:
 	rm -f $(DESTDIR)$(DOCDIR)/miniircd.conf
 	-rmdir $(DESTDIR)$(DOCDIR)
 
-.PHONY: all sanitize tsan check test clean install uninstall
+.PHONY: all sanitize tsan check test clean install uninstall \
+        release-check dist FORCE

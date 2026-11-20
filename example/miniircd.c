@@ -13,6 +13,7 @@
 #include "uircd.h"
 #include "auth.h"
 #include "daemonize.h"
+#include "version.h"
 
 #include "iox_loop.h"
 #include "iox_fd.h"
@@ -1378,7 +1379,7 @@ main(int argc, char **argv)
     cfg.server_name = hc.srvname;
     cfg.network = hc.network;
     cfg.motd = motd;
-    cfg.version = "uircd-1.0";
+    cfg.version = "uircd-" UIRCD_VERSION;
     cfg.require_login = hc.require_login;
     cfg.host_cloak = hc.host_cloak;
     /* A per-run secret so cloaks cannot be reversed to the real address. */

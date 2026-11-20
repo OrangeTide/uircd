@@ -1,6 +1,8 @@
 *.o
 /miniircd
 /uircdpasswd
+/version.h
+/uircd-*.tar.gz
 test/functional
 HARDEN/harness/kline_self_uaf
 HARDEN/harness/conn_cap
