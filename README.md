@@ -194,9 +194,10 @@ operator's `log` callback writes locally.
 
 A connecting user's IP address is recorded in the operator log (the example logs
 a `connect` event with the peer address). To other users it is cloaked by
-default: the host shown in `WHO` and in the `nick!user@host` message prefix is a
-keyed hash of the real address, `<hex>.cloak`, from which the real address
-cannot be recovered. An operator still sees real addresses in `WHO`, and bans
+default: the host shown in `WHO`/`WHOIS` and in the `nick!user@host` message
+prefix is a keyed hash of the real address, `<hex>.cloak`, from which the real
+address cannot be recovered. An operator still sees real addresses in
+`WHO`/`WHOIS`, and bans
 (`KLINE`) always match the real address, so cloaking is display-only. The key is
 random per server run, so a user's cloak is stable within a run and changes on
 restart. Set `[privacy] host-cloak = false` to show raw IPs instead, the older

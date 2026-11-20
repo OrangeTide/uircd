@@ -268,6 +268,50 @@ test_cloak_visibility(void)
 }
 
 static void
+test_whois(void)
+{
+    struct uircd *s;
+    struct uircd_client *probe, *tgt, *op, *vic;
+
+    /* non-operator: cloak, channels, and 401 for an unknown nick */
+    s = new_srv(0);
+    probe = reg(s, 0, "probe");
+    tgt = reg(s, 1, "tgt");
+    feed(s, tgt, "JOIN #x\r\n");
+    clear(0);
+    feed(s, probe, "WHOIS tgt\r\n");
+    want(0, " 311 ", "WHOIS sends the user line 311");
+    want(0, " 319 ", "WHOIS sends the channels line 319");
+    want(0, "#x", "WHOIS lists the target's channel");
+    want(0, " 318 ", "WHOIS ends with 318");
+    want(0, ".cloak", "a non-operator WHOIS shows the cloak");
+    wantnot(0, "198.51.100.7", "a non-operator WHOIS hides the real IP");
+
+    clear(0);
+    feed(s, probe, "WHOIS nobody\r\n");
+    want(0, " 401 ", "WHOIS of an unknown nick gives 401");
+    want(0, " 318 ", "WHOIS of an unknown nick still ends with 318");
+    uircd_closed(s, probe);
+    uircd_closed(s, tgt);
+    uircd_free(s);
+
+    /* operator: WHOIS shows the real IP */
+    g_auth = AUTH_OK;
+    s = new_srv(0);
+    op = uircd_accept(s, (void *)0, "198.51.100.7");
+    feed(s, op, "NICK op\r\nUSER u 0 * :R\r\nOPER admin pw\r\n");
+    vic = reg(s, 1, "vic");
+    (void)vic;
+    clear(0);
+    feed(s, op, "WHOIS vic\r\n");
+    want(0, " 311 ", "an operator WHOIS sends 311");
+    want(0, "198.51.100.7", "an operator WHOIS shows the real IP");
+    uircd_closed(s, op);
+    uircd_free(s);
+    g_auth = AUTH_NONE;
+}
+
+static void
 test_auth_accept(void)
 {
     struct uircd *s;
@@ -316,6 +360,7 @@ main(void)
     test_operator_rules();
     test_quit_broadcast();
     test_cloak_visibility();
+    test_whois();
     test_auth_accept();
     test_auth_reject();
 

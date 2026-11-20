@@ -1331,6 +1331,57 @@ cmd_who(struct uircd *s, struct uircd_client *c, struct msg *m)
     return 0;
 }
 
+static int
+cmd_whois(struct uircd *s, struct uircd_client *c, struct msg *m)
+{
+    struct uircd_client *t;
+    const char *nick, *host;
+    char chans[400];
+    size_t cl = 0;
+    unsigned i;
+
+    if (need_params(s, c, m, 1))
+        return 0;
+    /* "WHOIS <nick>" or "WHOIS <server> <nick>": the target is the last arg. */
+    nick = m->argv[m->argc - 1];
+    t = find_nick(s, nick);
+    if (!t || !t->registered) {
+        numeric(s, c, 401, "%s :No such nick/channel", nick);
+        numeric(s, c, 318, "%s :End of /WHOIS list", nick);
+        return 0;
+    }
+
+    /* 311: an operator sees the real host, others see the cloak (as in WHO). */
+    host = (c->umodes & UMODE_OPER) ? t->host : vis_host(t);
+    numeric(s, c, 311, "%s %s %s * :%s", t->nick, t->user, host, t->real);
+
+    /* 319: the channels the target is on, each with the viewer-agnostic prefix. */
+    for (i = 0; i < t->n_chans; i++) {
+        struct uircd_channel *ch = t->chans[i];
+        struct member *mm = chan_member(ch, t);
+        const char *pfx = "";
+        int n;
+
+        if (mm)
+            pfx = (mm->flags & MEMB_OP) ? "@" :
+                  (mm->flags & MEMB_VOICE) ? "+" : "";
+        n = snprintf(chans + cl, sizeof(chans) - cl, "%s%s ", pfx, ch->name);
+        if (n < 0 || (size_t)n >= sizeof(chans) - cl)
+            break; /* stop at the buffer bound rather than truncate mid-name */
+        cl += (size_t)n;
+    }
+    if (cl > 0) {
+        chans[cl - 1] = '\0'; /* drop the trailing space */
+        numeric(s, c, 319, "%s :%s", t->nick, chans);
+    }
+
+    numeric(s, c, 312, "%s %s :%s", t->nick, srv_name(s), srv_name(s));
+    if (t->umodes & UMODE_OPER)
+        numeric(s, c, 313, "%s :is an IRC operator", t->nick);
+    numeric(s, c, 318, "%s :End of /WHOIS list", t->nick);
+    return 0;
+}
+
 static void
 apply_chan_mode(struct uircd *s, struct uircd_client *c,
                 struct uircd_channel *ch, struct msg *m)
@@ -1700,6 +1751,7 @@ static const struct handler handlers[] = {
     { "NAMES", cmd_names, 1 },
     { "LIST", cmd_list, 1 },
     { "WHO", cmd_who, 1 },
+    { "WHOIS", cmd_whois, 1 },
     { "MODE", cmd_mode, 1 },
     { "KICK", cmd_kick, 1 },
     { "KILL", cmd_kill, 1 },

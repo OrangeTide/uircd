@@ -3,6 +3,15 @@
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- `WHOIS`: replies with the user line (311), channels (319), server (312),
+  operator status (313), and end (318), or 401 for an unknown nick. The host in
+  the 311 reply respects cloaking: an operator sees the real address, others see
+  the cloak.
+
 ## 0.1.0 - 2026-11-19
 
 First release. Early and intentionally minimal: the public API is still
