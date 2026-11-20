@@ -3,9 +3,11 @@
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
-## 1.0.0 - 2026-11-19
+## 0.1.0 - 2026-11-19
 
-First release.
+First release. Early and intentionally minimal: the public API is still
+settling (the authentication contract was reworked late in development) and the
+IRC command set is a subset. See "Known limitations" below.
 
 ### Library (uircd.h, uircd.c)
 
@@ -47,3 +49,16 @@ First release.
   `make install`, `make dist`, and man pages for `miniircd` and `uircdpasswd`.
 - Continuous integration runs the build, the functional tests, the sanitizer
   harnesses, and a ThreadSanitizer load.
+
+### Known limitations
+
+- The IRC command set is a subset. Notably absent: WHOIS, AWAY, ISON, USERHOST,
+  INVITE, WALLOPS, VERSION, LUSERS, and MOTD as a command. A client sending an
+  unimplemented command receives an "Unknown command" (421) reply.
+- The public API is not yet frozen. Expect it to change before a 1.0 release;
+  the authentication callback contract in particular changed late.
+- Testing is synthetic and local: sanitizer falsifiers, a dispatch fuzzer, and a
+  functional suite that drives the engine over loopback. It has not been
+  exercised against real IRC clients or over a real network.
+- Built and tested on Linux with glibc and OpenSSL; other platforms are not yet
+  supported by the example host.
