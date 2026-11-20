@@ -9,6 +9,7 @@ on:
       - 'Makefile'
       - 'example/**'
       - 'tools/**'
+      - 'test/**'
       - 'third_party/**'
       - 'vendor/**'
       - 'HARDEN/harness/**'
@@ -36,6 +37,8 @@ jobs:
         run: make
       - name: Config check
         run: ./miniircd -C -f example/miniircd.conf
+      - name: Functional tests (ASan + UBSan)
+        run: make test
       - name: Run HARDEN harnesses (ASan + UBSan)
         run: make check
 

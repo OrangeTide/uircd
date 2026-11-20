@@ -33,6 +33,7 @@ call behind one lock. `example/miniircd.c` shows exactly that.
 make                # optimized build: ./miniircd and ./uircdpasswd
 make SANITIZE=1     # AddressSanitizer + UndefinedBehaviorSanitizer build
 make check          # build and run the HARDEN falsifiers under sanitizers
+make test           # build and run the functional test suite under sanitizers
 make install        # install binaries, man pages, and a sample config
 make clean
 ```

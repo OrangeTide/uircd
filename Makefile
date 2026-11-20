@@ -4,6 +4,7 @@
 #   make SANITIZE=1   build with AddressSanitizer + UndefinedBehaviorSanitizer
 #   make sanitize     same as SANITIZE=1
 #   make check        build and run the HARDEN falsifiers under sanitizers
+#   make test         build and run the functional test suite under sanitizers
 #   make install      install binaries, man pages, and a sample config
 #   make clean
 
@@ -101,10 +102,21 @@ check:
 	if [ $$fail -eq 0 ]; then echo "ALL HARNESSES: survived"; \
 	else echo "CHECK FAILED"; exit 1; fi
 
+# Functional test suite: drives the engine through its public API and checks
+# correct protocol behavior (numerics, routing, operator rules, auth, cloaking).
+# Built under the sanitizers so it also catches regressions in memory safety.
+TEST_DIR = test
+test:
+	@echo "=== functional ==="
+	@$(CC) $(HARNESS_SAN) -g -std=c11 -D_GNU_SOURCE -I. \
+	    $(TEST_DIR)/functional.c -o $(TEST_DIR)/functional
+	@$(TEST_DIR)/functional
+
 clean:
 	rm -f $(BINS) $(LIB_OBJS) $(IOX_OBJS) $(SCRYPT_OBJS) \
 	    $(EX_OBJS) $(TOOL_OBJS) \
-	    $(addprefix $(HARNESS_DIR)/,$(HARNESSES))
+	    $(addprefix $(HARNESS_DIR)/,$(HARNESSES)) \
+	    $(TEST_DIR)/functional
 
 # Install the daemon to sbin, the passwd tool to bin, the man pages, and a
 # sample config. DESTDIR stages the tree for packaging.
@@ -126,4 +138,4 @@ uninstall:
 	rm -f $(DESTDIR)$(DOCDIR)/miniircd.conf
 	-rmdir $(DESTDIR)$(DOCDIR)
 
-.PHONY: all sanitize tsan check clean install uninstall
+.PHONY: all sanitize tsan check test clean install uninstall
