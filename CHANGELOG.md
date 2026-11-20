@@ -3,6 +3,17 @@
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- Respond to `CAP LS`/`LIST` with an empty capability list and `NAK` requests,
+  so a client doing capability negotiation on connect (for example irssi)
+  finishes at once instead of waiting for a reply that never came.
+- A bare channel list-mode query (`MODE #chan b`, which clients send on join)
+  now returns the end-of-list numeric (`368`, and `349`/`347` for `e`/`I`)
+  instead of `482 You're not channel operator`. Found by testing against irssi.
+
 ## 0.2.0 - 2026-11-19
 
 ### Added

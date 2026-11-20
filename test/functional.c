@@ -311,6 +311,54 @@ test_whois(void)
     g_auth = AUTH_NONE;
 }
 
+/* Replays the command stream a real client (irssi 1.4) sends, exercising the
+ * paths that only showed up under real-client testing: CAP negotiation, the
+ * user-mode set on connect, and the on-join ban-list query. */
+static void
+test_irssi_flow(void)
+{
+    struct uircd *s = new_srv(0);
+    struct uircd_client *c = uircd_accept(s, (void *)0, "198.51.100.7");
+
+    if (!c) {
+        fprintf(stderr, "FAIL: irssi accept\n");
+        exit(1);
+    }
+
+    /* CAP LS arrives before registration; the server answers with an empty
+     * capability list so the client proceeds at once. */
+    clear(0);
+    feed(s, c, "CAP LS 302\r\n");
+    want(0, "CAP ", "CAP LS gets a CAP reply");
+    want(0, "LS :", "CAP LS reply is an empty capability list");
+
+    feed(s, c, "NICK irssiuser\r\nUSER tester tester 127.0.0.1 :uircd test\r\n");
+    feed(s, c, "CAP END\r\n");
+    want(0, " 001 ", "registration completes through the CAP flow");
+    wantnot(0, " 421 ", "CAP is a known command, not 421");
+
+    /* irssi sets +i on itself right after registering. */
+    clear(0);
+    feed(s, c, "MODE irssiuser +i\r\n");
+    want(0, "+i", "MODE +i is acknowledged");
+    wantnot(0, " 421 ", "MODE on a user is handled");
+
+    feed(s, c, "JOIN #test\r\n");
+    clear(0);
+    feed(s, c, "MODE #test\r\n");
+    want(0, " 324 ", "MODE #chan returns the channel modes");
+
+    /* The on-join ban-list query must not demand operator (regression from the
+     * irssi test, which got 482 here). */
+    clear(0);
+    feed(s, c, "MODE #test b\r\n");
+    want(0, " 368 ", "MODE #chan b returns an end-of-ban-list");
+    wantnot(0, " 482 ", "a ban-list query does not require operator");
+
+    uircd_closed(s, c);
+    uircd_free(s);
+}
+
 static void
 test_auth_accept(void)
 {
@@ -361,6 +409,7 @@ main(void)
     test_quit_broadcast();
     test_cloak_visibility();
     test_whois();
+    test_irssi_flow();
     test_auth_accept();
     test_auth_reject();
 

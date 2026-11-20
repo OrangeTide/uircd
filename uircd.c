@@ -1382,6 +1382,29 @@ cmd_whois(struct uircd *s, struct uircd_client *c, struct msg *m)
     return 0;
 }
 
+/* Minimal IRCv3 capability negotiation. The server offers no capabilities, so
+ * it answers CAP LS/LIST with an empty list and NAKs any request; this lets a
+ * client (which sends CAP LS on connect) finish negotiation at once instead of
+ * waiting for a reply that never comes. END and the rest need no action. */
+static int
+cmd_cap(struct uircd *s, struct uircd_client *c, struct msg *m)
+{
+    const char *sub, *tgt;
+
+    if (m->argc < 1)
+        return 0;
+    sub = m->argv[0];
+    tgt = c->nick[0] ? c->nick : "*";
+    if (!strcasecmp(sub, "LS"))
+        sendf(s, c, ":%s CAP %s LS :", srv_name(s), tgt);
+    else if (!strcasecmp(sub, "LIST"))
+        sendf(s, c, ":%s CAP %s LIST :", srv_name(s), tgt);
+    else if (!strcasecmp(sub, "REQ"))
+        sendf(s, c, ":%s CAP %s NAK :%s", srv_name(s), tgt,
+              m->argc > 1 ? m->argv[1] : "");
+    return 0;
+}
+
 static void
 apply_chan_mode(struct uircd *s, struct uircd_client *c,
                 struct uircd_channel *ch, struct msg *m)
@@ -1492,6 +1515,30 @@ cmd_mode(struct uircd *s, struct uircd_client *c, struct msg *m)
             buf[k] = '\0';
             numeric(s, c, 324, "%s %s", ch->name, buf);
             return 0;
+        }
+        /* A bare list-mode letter (e.g. "MODE #c b") is a query, not a change:
+         * a client sends it on join. Return the (empty) list rather than 482.
+         * These lists are not implemented, so only the end numerics are sent. */
+        if (m->argc == 2) {
+            const char *q = m->argv[1];
+            if (*q == '+')
+                q++;
+            if (q[0] && !q[1]) {
+                if (*q == 'b') {
+                    numeric(s, c, 368, "%s :End of channel ban list", ch->name);
+                    return 0;
+                }
+                if (*q == 'e') {
+                    numeric(s, c, 349, "%s :End of channel exception list",
+                            ch->name);
+                    return 0;
+                }
+                if (*q == 'I') {
+                    numeric(s, c, 347, "%s :End of channel invite list",
+                            ch->name);
+                    return 0;
+                }
+            }
         }
         mem = chan_member(ch, c);
         if ((!mem || !(mem->flags & MEMB_OP)) && !(c->umodes & UMODE_OPER)) {
@@ -1741,7 +1788,7 @@ static const struct handler handlers[] = {
     { "QUIT", cmd_quit, 0 },
     { "PING", cmd_ping, 0 },
     { "PONG", NULL, 0 },
-    { "CAP", NULL, 0 },
+    { "CAP", cmd_cap, 0 },
     { "OPER", cmd_oper, 1 },
     { "JOIN", cmd_join, 1 },
     { "PART", cmd_part, 1 },
